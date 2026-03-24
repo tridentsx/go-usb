@@ -57,6 +57,7 @@ type DeviceHandle struct {
 	claimedIfaces map[uint8]bool
 	mu            sync.RWMutex
 	closed        bool
+	wrapped       bool
 
 	// Reaper state for isochronous transfers
 	reapMutex sync.Mutex
@@ -338,11 +339,20 @@ func (h *DeviceHandle) ClaimInterface(iface uint8) error {
 		return nil
 	}
 
+	if h.shouldTreatClaimBusyAsSuccess(errno) {
+		h.claimedIfaces[iface] = true
+		return nil
+	}
+
 	// Fallback to simple claim if DISCONNECT_CLAIM not supported
 	if errno == syscall.ENOTTY || errno == syscall.EINVAL {
 		ifaceNum := uint32(iface)
 		_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, uintptr(h.fd), USBDEVFS_CLAIMINTERFACE, uintptr(unsafe.Pointer(&ifaceNum)))
 		if errno != 0 {
+			if h.shouldTreatClaimBusyAsSuccess(errno) {
+				h.claimedIfaces[iface] = true
+				return nil
+			}
 			return errno
 		}
 		h.claimedIfaces[iface] = true
@@ -352,6 +362,9 @@ func (h *DeviceHandle) ClaimInterface(iface uint8) error {
 	return errno
 }
 
+func (h *DeviceHandle) shouldTreatClaimBusyAsSuccess(errno syscall.Errno) bool {
+	return h.wrapped && errno == syscall.EBUSY
+}
 
 func (h *DeviceHandle) ReleaseInterface(iface uint8) error {
 	h.mu.Lock()
@@ -444,7 +457,6 @@ func (h *DeviceHandle) DetachKernelDriver(iface uint8) error {
 
 	return nil
 }
-
 
 func (h *DeviceHandle) AttachKernelDriver(iface uint8) error {
 	h.mu.Lock()
@@ -1196,6 +1208,13 @@ func WrapSysDevice(fd int) (*DeviceHandle, error) {
 		fd:            fd,
 		claimedIfaces: make(map[uint8]bool),
 		closed:        false,
+		wrapped:       true,
 		reapMap:       make(map[uintptr]func(error)),
 	}, nil
+}
+
+func (h *DeviceHandle) Wrapped() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.wrapped
 }
