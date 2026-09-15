@@ -146,6 +146,14 @@ type WindowsUSBDevice struct {
 	HardwareID   string
 	Bus          uint8
 	Address      uint8
+
+	// DevInst is the devnode handle for this interface, used to walk the
+	// device tree and find the hub the device is attached to.
+	DevInst uint32
+
+	// WinUSB reports whether this path was found through the WinUSB interface
+	// class, which is what determines whether it can be opened for I/O.
+	WinUSB bool
 }
 
 // EnumerateUSBDevices enumerates all USB devices using SetupAPI.
@@ -170,6 +178,7 @@ func EnumerateUSBDevices() ([]*WindowsUSBDevice, error) {
 		&GUID_DEVINTERFACE_USB_DEVICE,
 		&GUID_DEVINTERFACE_USB_HUB,
 	} {
+		isWinUSB := guid == &GUID_DEVINTERFACE_WINUSB
 		found, err := enumerateWithGUID(guid)
 		if err != nil {
 			if firstErr == nil {
@@ -192,6 +201,7 @@ func EnumerateUSBDevices() ([]*WindowsUSBDevice, error) {
 			}
 
 			seen[key] = true
+			dev.WinUSB = isWinUSB
 			devices = append(devices, dev)
 		}
 	}
@@ -263,6 +273,7 @@ func enumerateWithGUID(guid *windows.GUID) ([]*WindowsUSBDevice, error) {
 
 		device := &WindowsUSBDevice{
 			DevicePath: devicePath,
+			DevInst:    devInfoData.DevInst,
 		}
 
 		devices = append(devices, device)

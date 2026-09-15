@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -32,17 +33,19 @@ func WithInaccessibleDevices() DeviceListOption {
 }
 
 // DeviceList returns a list of all USB devices on the system.
-// This uses SetupAPI enumeration on Windows.
 //
-// Every enumerated device is returned, whether or not it can be opened, which
-// matches the Linux and macOS backends. Opening a device still requires it to
-// be bound to WinUSB, so Device.Open may fail for entries listed here; devices
-// owned by another function driver, HID devices in particular, enumerate but
-// cannot be opened for raw I/O.
+// Devices are found with SetupAPI and then described by asking the hub each one
+// is attached to, which yields the device descriptor, configuration
+// descriptors, cached strings, bus address and speed without opening the
+// device. That works whatever function driver owns the device, so HID and
+// class-driver devices are described as fully as WinUSB ones.
 //
-// Descriptors are read from the device when it can be opened. When it cannot,
-// the vendor and product IDs are recovered from the device path and the
-// remaining descriptor fields are left zero.
+// Opening a device still requires it to be bound to WinUSB, so Device.Open may
+// fail for entries listed here.
+//
+// Bus numbers are synthetic: Windows has no bus number, so root hubs are
+// numbered in a stable order. Addresses are the real USB device addresses
+// reported by the hub.
 func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 	// Options are accepted for API compatibility; see WithInaccessibleDevices.
 	options := &deviceListOptions{}
@@ -55,168 +58,181 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 		return nil, err
 	}
 
-	devices := make([]*Device, 0, len(winDevices))
+	// Locate every interface on the USB tree first, so that duplicates can be
+	// collapsed and bus numbers assigned before any hub is queried.
+	type located struct {
+		wd  *WindowsUSBDevice
+		loc deviceLocation
+		ok  bool
+	}
+
+	entries := make([]located, 0, len(winDevices))
+	roots := make(map[uint32]bool)
 	for _, wd := range winDevices {
-		device, err := createDeviceFromPath(wd.DevicePath)
-		if err != nil {
-			// The device cannot be opened, which is normal for anything not
-			// bound to WinUSB. Report what the path alone can tell us rather
-			// than hiding the device.
-			vid, pid := parseVidPidFromPath(wd.DevicePath)
-			device = &Device{
-				Path:       wd.DevicePath,
-				devicePath: wd.DevicePath,
-				Descriptor: DeviceDescriptor{
-					VendorID:  vid,
-					ProductID: pid,
-				},
-			}
+		e := located{wd: wd}
+		if loc, err := locateDevice(wd.DevInst); err == nil {
+			e.loc, e.ok = loc, true
+			roots[loc.RootInst] = true
+		}
+		entries = append(entries, e)
+	}
+	buses := busNumbering(roots)
+
+	// A composite device is reachable both through its own device interface and
+	// through each function interface, and they all resolve to the same hub
+	// port. Collapse them to one entry per port so the list has one line per
+	// physical device, while remembering which path can actually be opened:
+	// identity comes from the device interface, openability from WinUSB.
+	type merged struct {
+		displayPath string
+		openPath    string
+		loc         deviceLocation
+	}
+
+	byPort := make(map[string]*merged)
+	var order []string
+	for _, e := range entries {
+		if !e.ok {
+			continue
+		}
+
+		key := strings.ToLower(e.loc.HubPath) + "/" + strconv.Itoa(e.loc.Port)
+		m, seen := byPort[key]
+		if !seen {
+			m = &merged{loc: e.loc}
+			byPort[key] = m
+			order = append(order, key)
+		}
+
+		// Prefer the device interface for identity, since a function interface
+		// path describes only part of a composite device.
+		if m.displayPath == "" || (isFunctionInterfacePath(m.displayPath) && !isFunctionInterfacePath(e.wd.DevicePath)) {
+			m.displayPath = e.wd.DevicePath
+		}
+		// Only a WinUSB interface can be opened for I/O.
+		if m.openPath == "" && e.wd.WinUSB {
+			m.openPath = e.wd.DevicePath
+		}
+	}
+
+	devices := make([]*Device, 0, len(order))
+	hubs := newHubCache()
+	defer hubs.closeAll()
+
+	for _, key := range order {
+		m := byPort[key]
+
+		device := newDeviceFromPath(m.displayPath)
+		if m.openPath != "" {
+			// Open must target the WinUSB interface, which is not necessarily
+			// the path the device is identified by.
+			device.devicePath = m.openPath
+		}
+		device.Bus = buses[m.loc.RootInst]
+
+		if hub, err := hubs.get(m.loc.HubPath); err == nil {
+			describeFromHub(device, hub, m.loc.Port)
 		}
 		devices = append(devices, device)
+	}
+
+	// Anything whose position on the tree could not be established is still
+	// reported, identified by whatever its path reveals.
+	for _, e := range entries {
+		if !e.ok {
+			devices = append(devices, newDeviceFromPath(e.wd.DevicePath))
+		}
 	}
 
 	return devices, nil
 }
 
-// createDeviceFromPath creates a Device from a Windows device path
-func createDeviceFromPath(devicePath string) (*Device, error) {
-	// Open the device temporarily to read descriptors
-	pathPtr, err := windows.UTF16PtrFromString(devicePath)
-	if err != nil {
-		return nil, err
-	}
-
-	fileHandle, err := windows.CreateFile(
-		pathPtr,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OVERLAPPED,
-		0,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open device: %w", err)
-	}
-	defer windows.CloseHandle(fileHandle)
-
-	// Initialize WinUSB
-	var winusbHandle winusbInterfaceHandle
-	r0, _, e1 := syscall.SyscallN(
-		procWinUsb_Initialize.Addr(),
-		uintptr(fileHandle),
-		uintptr(unsafe.Pointer(&winusbHandle)),
-	)
-	if r0 == 0 {
-		return nil, fmt.Errorf("WinUsb_Initialize failed: %w", e1)
-	}
-	defer syscall.SyscallN(procWinUsb_Free.Addr(), uintptr(winusbHandle))
-
-	// Read device descriptor
-	descBuf := make([]byte, 18)
-	var transferred uint32
-
-	r0, _, e1 = syscall.SyscallN(
-		procWinUsb_GetDescriptor.Addr(),
-		uintptr(winusbHandle),
-		uintptr(USB_DT_DEVICE),
-		uintptr(0),
-		uintptr(0),
-		uintptr(unsafe.Pointer(&descBuf[0])),
-		uintptr(len(descBuf)),
-		uintptr(unsafe.Pointer(&transferred)),
-	)
-	if r0 == 0 {
-		return nil, fmt.Errorf("failed to get device descriptor: %w", e1)
-	}
-
-	// Parse VID/PID from device path as fallback
-	vid, pid := parseVidPidFromPath(devicePath)
-
-	device := &Device{
-		Path:       devicePath,
-		devicePath: devicePath,
-		Descriptor: DeviceDescriptor{
-			Length:            descBuf[0],
-			DescriptorType:    descBuf[1],
-			USBVersion:        binary.LittleEndian.Uint16(descBuf[2:4]),
-			DeviceClass:       descBuf[4],
-			DeviceSubClass:    descBuf[5],
-			DeviceProtocol:    descBuf[6],
-			MaxPacketSize0:    descBuf[7],
-			VendorID:          binary.LittleEndian.Uint16(descBuf[8:10]),
-			ProductID:         binary.LittleEndian.Uint16(descBuf[10:12]),
-			DeviceVersion:     binary.LittleEndian.Uint16(descBuf[12:14]),
-			ManufacturerIndex: descBuf[14],
-			ProductIndex:      descBuf[15],
-			SerialNumberIndex: descBuf[16],
-			NumConfigurations: descBuf[17],
-		},
-	}
-
-	// Use parsed VID/PID if descriptor read failed
-	if device.Descriptor.VendorID == 0 && vid != 0 {
-		device.Descriptor.VendorID = vid
-		device.Descriptor.ProductID = pid
-	}
-
-	// Try to read string descriptors for SysfsStrings
-	device.SysfsStrings = &SysfsStrings{}
-	if device.Descriptor.ManufacturerIndex > 0 {
-		if str, err := readStringDescriptor(winusbHandle, device.Descriptor.ManufacturerIndex); err == nil {
-			device.SysfsStrings.Manufacturer = str
-		}
-	}
-	if device.Descriptor.ProductIndex > 0 {
-		if str, err := readStringDescriptor(winusbHandle, device.Descriptor.ProductIndex); err == nil {
-			device.SysfsStrings.Product = str
-		}
-	}
-	if device.Descriptor.SerialNumberIndex > 0 {
-		if str, err := readStringDescriptor(winusbHandle, device.Descriptor.SerialNumberIndex); err == nil {
-			device.SysfsStrings.Serial = str
-		}
-	}
-
-	return device, nil
+// isFunctionInterfacePath reports whether a device path refers to one function
+// of a composite device rather than the device itself.
+func isFunctionInterfacePath(path string) bool {
+	return strings.Contains(strings.ToLower(path), "&mi_")
 }
 
-// readStringDescriptor reads a string descriptor
-func readStringDescriptor(winusbHandle winusbInterfaceHandle, index uint8) (string, error) {
-	buf := make([]byte, 256)
-	var transferred uint32
+// newDeviceFromPath builds a Device with only what the path itself reveals.
+func newDeviceFromPath(devicePath string) *Device {
+	vid, pid := parseVidPidFromPath(devicePath)
+	return &Device{
+		Path:       devicePath,
+		devicePath: devicePath,
+		Descriptor: DeviceDescriptor{VendorID: vid, ProductID: pid},
+	}
+}
 
-	r0, _, e1 := syscall.SyscallN(
-		procWinUsb_GetDescriptor.Addr(),
-		uintptr(winusbHandle),
-		uintptr(USB_DT_STRING),
-		uintptr(index),
-		uintptr(0x0409), // English (US)
-		uintptr(unsafe.Pointer(&buf[0])),
-		uintptr(len(buf)),
-		uintptr(unsafe.Pointer(&transferred)),
-	)
-	if r0 == 0 {
-		return "", e1
+// describeFromHub fills in a device's descriptors, address and strings by
+// querying the hub it is attached to.
+func describeFromHub(device *Device, hub windows.Handle, port int) {
+	nc, err := hubNodeConnection(hub, port)
+	if err != nil || !nc.Connected {
+		return
 	}
 
-	if transferred < 2 {
-		return "", fmt.Errorf("invalid string descriptor")
+	device.Address = uint8(nc.DeviceAddress)
+	if nc.Descriptor.Length == 18 {
+		device.Descriptor = nc.Descriptor
 	}
 
-	length := int(buf[0])
-	if length > int(transferred) {
-		length = int(transferred)
+	device.SysfsStrings = &DeviceStrings{
+		Manufacturer: hubStringDescriptor(hub, port, device.Descriptor.ManufacturerIndex),
+		Product:      hubStringDescriptor(hub, port, device.Descriptor.ProductIndex),
+		Serial:       hubStringDescriptor(hub, port, device.Descriptor.SerialNumberIndex),
 	}
 
-	result := make([]uint16, 0, (length-2)/2)
-	for i := 2; i < length; i += 2 {
-		if i+1 < length {
-			result = append(result, binary.LittleEndian.Uint16(buf[i:i+2]))
+	for i := uint8(0); i < device.Descriptor.NumConfigurations; i++ {
+		raw, err := hubConfigDescriptor(hub, port, i)
+		if err != nil || len(raw) < 9 {
+			continue
+		}
+		device.Configs = append(device.Configs, RawConfigDescriptor{
+			Length:             raw[0],
+			DescriptorType:     raw[1],
+			TotalLength:        binary.LittleEndian.Uint16(raw[2:4]),
+			NumInterfaces:      raw[4],
+			ConfigurationValue: raw[5],
+			ConfigurationIndex: raw[6],
+			Attributes:         raw[7],
+			MaxPower:           raw[8],
+		})
+	}
+}
+
+// hubCache keeps hub handles open for the duration of one enumeration, since
+// several devices usually share a hub.
+type hubCache struct {
+	handles map[string]windows.Handle
+}
+
+func newHubCache() *hubCache {
+	return &hubCache{handles: make(map[string]windows.Handle)}
+}
+
+func (c *hubCache) get(path string) (windows.Handle, error) {
+	if h, ok := c.handles[path]; ok {
+		if h == windows.InvalidHandle {
+			return h, ErrNotFound
+		}
+		return h, nil
+	}
+
+	h, err := openHubForQuery(path)
+	if err != nil {
+		c.handles[path] = windows.InvalidHandle
+		return windows.InvalidHandle, err
+	}
+	c.handles[path] = h
+	return h, nil
+}
+
+func (c *hubCache) closeAll() {
+	for _, h := range c.handles {
+		if h != windows.InvalidHandle {
+			windows.CloseHandle(h)
 		}
 	}
-
-	return string(utf16ToRunes(result)), nil
 }
 
 // parseVidPidFromPath extracts VID and PID from Windows device path

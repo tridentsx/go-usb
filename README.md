@@ -241,7 +241,7 @@ method cannot be added to one platform without the others.
 
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
-| Device enumeration | sysfs | IOKit | SetupAPI (all devices) |
+| Device enumeration | sysfs | IOKit | SetupAPI + hub IOCTLs (all devices) |
 | Control / bulk / interrupt transfers | yes | yes | yes |
 | Isochronous transfers | yes (usbfs URBs) | yes (IOKit) | `ErrNotSupported` |
 | Asynchronous transfers | yes (`AsyncTransfer`) | yes (`AsyncTransfer`) | not yet |
@@ -254,11 +254,23 @@ method cannot be added to one platform without the others.
 
 ### Opening devices on Windows
 
-`DeviceList` reports every USB device, matching Linux and macOS. Opening one for
-I/O is a separate matter: WinUSB must be the device's function driver. A device
-owned by another driver enumerates, and reports its vendor and product ID, but
-`Device.Open` will fail. Use a tool such as Zadig, or ship an INF, to bind
-WinUSB to the device you intend to talk to.
+`DeviceList` reports every USB device, matching Linux and macOS. Descriptors,
+cached strings, bus address and speed come from the hub each device is attached
+to, so they are available whatever driver owns the device.
+
+Opening one for I/O is a separate matter: WinUSB must be the device's function
+driver. A device owned by another driver is fully described but `Device.Open`
+will fail. Use a tool such as Zadig, or ship an INF, to bind WinUSB to the
+device you intend to talk to.
+
+Bus numbers are synthetic. Windows has no notion of a USB bus number, so root
+hubs are numbered in a stable order; the value does not correspond to anything
+the OS reports. Device addresses are the real addresses the hub reports.
+
+For a composite device, `Device.Path` identifies the device while opening
+targets its WinUSB function interface. Only the first such function is used, so
+a device exposing several WinUSB functions is currently reachable through one of
+them.
 
 ### Accessing HID devices
 
