@@ -65,15 +65,6 @@ const (
 	SuperSpeed = 0x04
 )
 
-// WINUSB_SETUP_PACKET structure
-type winusbSetupPacket struct {
-	RequestType uint8
-	Request     uint8
-	Value       uint16
-	Index       uint16
-	Length      uint16
-}
-
 // USB_INTERFACE_DESCRIPTOR structure
 type winusbInterfaceDescriptor struct {
 	bLength            uint8
@@ -661,33 +652,12 @@ func (h *DeviceHandle) Status(requestType uint8, index uint16) (uint16, error) {
 
 // controlTransferInternal is an internal helper that doesn't acquire locks
 func (h *DeviceHandle) controlTransferInternal(requestType, request uint8, value, index uint16, data []byte, timeout time.Duration) (int, error) {
-	setupPacket := winusbSetupPacket{
-		RequestType: requestType,
-		Request:     request,
-		Value:       value,
-		Index:       index,
-		Length:      uint16(len(data)),
-	}
-
-	var dataPtr unsafe.Pointer
-	if len(data) > 0 {
-		dataPtr = unsafe.Pointer(&data[0])
-	}
+	packet := encodeSetupPacket(requestType, request, value, index, uint16(len(data)))
 
 	var transferred uint32
-
-	r0, _, e1 := syscall.SyscallN(
-		procWinUsb_ControlTransfer.Addr(),
-		uintptr(h.winusbHandle),
-		uintptr(unsafe.Pointer(&setupPacket)),
-		uintptr(dataPtr),
-		uintptr(len(data)),
-		uintptr(unsafe.Pointer(&transferred)),
-		0, // No overlapped for synchronous
-	)
-
-	if r0 == 0 {
-		return 0, fmt.Errorf("WinUsb_ControlTransfer failed: %w", e1)
+	ok, err := winusbControlTransfer(h.winusbHandle, packet, data, &transferred, nil)
+	if !ok {
+		return 0, fmt.Errorf("WinUsb_ControlTransfer failed: %w", err)
 	}
 
 	return int(transferred), nil

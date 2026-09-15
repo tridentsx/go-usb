@@ -20,22 +20,31 @@ type deviceListOptions struct {
 }
 
 // WithInaccessibleDevices returns an option that includes devices that cannot
-// be opened (e.g., devices without WinUSB drivers). These devices will have
-// limited information available.
+// be opened.
+//
+// Deprecated: inaccessible devices are now always listed, matching the Linux
+// and macOS backends, so this option has no effect. It is retained for API
+// compatibility.
 func WithInaccessibleDevices() DeviceListOption {
 	return func(o *deviceListOptions) {
 		o.includeInaccessible = true
 	}
 }
 
-// DeviceList returns a list of USB devices on the system.
+// DeviceList returns a list of all USB devices on the system.
 // This uses SetupAPI enumeration on Windows.
 //
-// By default, only devices with WinUSB-compatible drivers that can be fully
-// accessed are returned. Use WithInaccessibleDevices() to include devices
-// that cannot be opened (they will have limited information).
+// Every enumerated device is returned, whether or not it can be opened, which
+// matches the Linux and macOS backends. Opening a device still requires it to
+// be bound to WinUSB, so Device.Open may fail for entries listed here; devices
+// owned by another function driver, HID devices in particular, enumerate but
+// cannot be opened for raw I/O.
+//
+// Descriptors are read from the device when it can be opened. When it cannot,
+// the vendor and product IDs are recovered from the device path and the
+// remaining descriptor fields are left zero.
 func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
-	// Apply options
+	// Options are accepted for API compatibility; see WithInaccessibleDevices.
 	options := &deviceListOptions{}
 	for _, opt := range opts {
 		opt(options)
@@ -46,24 +55,21 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 		return nil, err
 	}
 
-	var devices []*Device
+	devices := make([]*Device, 0, len(winDevices))
 	for _, wd := range winDevices {
 		device, err := createDeviceFromPath(wd.DevicePath)
 		if err != nil {
-			if options.includeInaccessible {
-				// Create a minimal device with just the path and parsed VID/PID
-				vid, pid := parseVidPidFromPath(wd.DevicePath)
-				device = &Device{
-					Path:       wd.DevicePath,
-					devicePath: wd.DevicePath,
-					Descriptor: DeviceDescriptor{
-						VendorID:  vid,
-						ProductID: pid,
-					},
-				}
-			} else {
-				// Skip devices we can't open
-				continue
+			// The device cannot be opened, which is normal for anything not
+			// bound to WinUSB. Report what the path alone can tell us rather
+			// than hiding the device.
+			vid, pid := parseVidPidFromPath(wd.DevicePath)
+			device = &Device{
+				Path:       wd.DevicePath,
+				devicePath: wd.DevicePath,
+				Descriptor: DeviceDescriptor{
+					VendorID:  vid,
+					ProductID: pid,
+				},
 			}
 		}
 		devices = append(devices, device)

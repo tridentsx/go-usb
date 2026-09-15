@@ -35,20 +35,7 @@ func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index 
 		return 0, ErrDeviceNotFound
 	}
 
-	setupPacket := winusbSetupPacket{
-		RequestType: requestType,
-		Request:     request,
-		Value:       value,
-		Index:       index,
-		Length:      uint16(len(data)),
-	}
-
-	var dataPtr unsafe.Pointer
-	if len(data) > 0 {
-		dataPtr = unsafe.Pointer(&data[0])
-	}
-
-	var transferred uint32
+	packet := encodeSetupPacket(requestType, request, value, index, uint16(len(data)))
 
 	// Create overlapped structure for async operation
 	var overlapped windows.Overlapped
@@ -59,38 +46,67 @@ func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index 
 	defer windows.CloseHandle(event)
 	overlapped.HEvent = event
 
-	r0, _, e1 := syscall.SyscallN(
-		procWinUsb_ControlTransfer.Addr(),
-		uintptr(h.winusbHandle),
-		uintptr(unsafe.Pointer(&setupPacket)),
-		uintptr(dataPtr),
-		uintptr(len(data)),
-		uintptr(unsafe.Pointer(&transferred)),
-		uintptr(unsafe.Pointer(&overlapped)),
-	)
-
-	if r0 == 0 {
-		if e1 == windows.ERROR_IO_PENDING {
-			// Wait for completion with timeout
-			waitResult, _ := windows.WaitForSingleObject(event, uint32(timeout.Milliseconds()))
-			if waitResult == uint32(windows.WAIT_TIMEOUT) {
-				return 0, ErrTimeout
-			}
-			if waitResult != uint32(windows.WAIT_OBJECT_0) {
-				return 0, fmt.Errorf("wait failed: %v", waitResult)
-			}
-			// Get the result
-			var bytesTransferred uint32
-			if err := windows.GetOverlappedResult(h.fileHandle, &overlapped, &bytesTransferred, false); err != nil {
-				return 0, err
-			}
-			transferred = bytesTransferred
-		} else {
+	var transferred uint32
+	ok, e1 := winusbControlTransfer(h.winusbHandle, packet, data, &transferred, &overlapped)
+	if !ok {
+		if e1 != windows.ERROR_IO_PENDING {
 			return 0, fmt.Errorf("WinUsb_ControlTransfer failed: %w", e1)
 		}
+		return h.awaitOverlapped(event, &overlapped, 0, timeout, false)
 	}
 
 	return int(transferred), nil
+}
+
+// awaitOverlapped waits for a pending overlapped transfer to finish.
+//
+// On timeout the pipe is aborted and the completion is then drained with a
+// blocking GetOverlappedResult. That second wait matters: until the request
+// actually completes, the kernel may still write into the OVERLAPPED structure
+// and the caller's data buffer, both of which live on the Go heap.
+//
+// endpoint is only used to abort a pipe; pass 0 for control transfers, which
+// are cancelled with CancelIoEx instead.
+func (h *DeviceHandle) awaitOverlapped(
+	event windows.Handle,
+	overlapped *windows.Overlapped,
+	endpoint uint8,
+	timeout time.Duration,
+	isPipe bool,
+) (int, error) {
+	timeoutMs := uint32(windows.INFINITE)
+	if timeout > 0 {
+		timeoutMs = uint32(timeout.Milliseconds())
+	}
+
+	waitResult, err := windows.WaitForSingleObject(event, timeoutMs)
+	if err != nil {
+		return 0, fmt.Errorf("WaitForSingleObject failed: %w", err)
+	}
+
+	switch waitResult {
+	case uint32(windows.WAIT_OBJECT_0):
+		var transferred uint32
+		if err := windows.GetOverlappedResult(h.fileHandle, overlapped, &transferred, false); err != nil {
+			return 0, err
+		}
+		return int(transferred), nil
+
+	case uint32(windows.WAIT_TIMEOUT):
+		if isPipe {
+			syscall.SyscallN(procWinUsb_AbortPipe.Addr(), uintptr(h.winusbHandle), uintptr(endpoint))
+		} else {
+			windows.CancelIoEx(h.fileHandle, overlapped)
+		}
+		// Drain the completion so the kernel is finished with the OVERLAPPED
+		// and the data buffer before we return and they become reusable.
+		var transferred uint32
+		windows.GetOverlappedResult(h.fileHandle, overlapped, &transferred, true)
+		return 0, ErrTimeout
+
+	default:
+		return 0, fmt.Errorf("wait failed: %v", waitResult)
+	}
 }
 
 // BulkTransfer performs a USB bulk transfer
@@ -170,29 +186,9 @@ func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, time
 
 	if r0 == 0 {
 		if e1 == windows.ERROR_IO_PENDING {
-			// Wait for completion with timeout
-			timeoutMs := uint32(windows.INFINITE)
-			if timeout > 0 {
-				timeoutMs = uint32(timeout.Milliseconds())
-			}
-			waitResult, _ := windows.WaitForSingleObject(event, timeoutMs)
-			if waitResult == uint32(windows.WAIT_TIMEOUT) {
-				// Cancel the pending I/O
-				syscall.SyscallN(procWinUsb_AbortPipe.Addr(), uintptr(h.winusbHandle), uintptr(endpoint))
-				return 0, ErrTimeout
-			}
-			if waitResult != uint32(windows.WAIT_OBJECT_0) {
-				return 0, fmt.Errorf("wait failed: %v", waitResult)
-			}
-			// Get the result
-			var bytesTransferred uint32
-			if err := windows.GetOverlappedResult(h.fileHandle, &overlapped, &bytesTransferred, false); err != nil {
-				return 0, err
-			}
-			transferred = bytesTransferred
-		} else {
-			return 0, fmt.Errorf("bulk transfer failed: %w", e1)
+			return h.awaitOverlapped(event, &overlapped, endpoint, timeout, true)
 		}
+		return 0, fmt.Errorf("bulk transfer failed: %w", e1)
 	}
 
 	return int(transferred), nil

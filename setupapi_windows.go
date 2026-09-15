@@ -2,6 +2,7 @@ package usb
 
 import (
 	"fmt"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -16,6 +17,15 @@ var (
 		Data2: 0x6530,
 		Data3: 0x11D2,
 		Data4: [8]byte{0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED},
+	}
+
+	// GUID_DEVINTERFACE_USB_HUB is the device interface GUID for USB hubs,
+	// which do not register the generic USB device interface.
+	GUID_DEVINTERFACE_USB_HUB = windows.GUID{
+		Data1: 0xF18A0E88,
+		Data2: 0xC30C,
+		Data3: 0x11D0,
+		Data4: [8]byte{0x88, 0x15, 0x00, 0xA0, 0xC9, 0x06, 0xBE, 0xD8},
 	}
 
 	// GUID for WinUSB devices
@@ -138,14 +148,59 @@ type WindowsUSBDevice struct {
 	Address      uint8
 }
 
-// EnumerateUSBDevices enumerates all USB devices using SetupAPI
+// EnumerateUSBDevices enumerates all USB devices using SetupAPI.
+//
+// The WinUSB, generic USB device and USB hub interface classes are all queried
+// and the results merged, deduplicated by device path. Hubs are included so
+// that output is comparable with lsusb on Linux, which lists them.
+//
+// Querying only one class is not enough. The WinUSB class covers devices bound
+// to WinUSB, including individual functions of composite devices, while the
+// generic class is registered by the hub driver for every device regardless of
+// which function driver owns it. A device can appear under either or both.
 func EnumerateUSBDevices() ([]*WindowsUSBDevice, error) {
-	// Try WinUSB interface first, then fall back to generic USB interface
-	devices, err := enumerateWithGUID(&GUID_DEVINTERFACE_WINUSB)
-	if err != nil || len(devices) == 0 {
-		devices, err = enumerateWithGUID(&GUID_DEVINTERFACE_USB_DEVICE)
+	var (
+		devices  []*WindowsUSBDevice
+		seen     = make(map[string]bool)
+		firstErr error
+	)
+
+	for _, guid := range []*windows.GUID{
+		&GUID_DEVINTERFACE_WINUSB,
+		&GUID_DEVINTERFACE_USB_DEVICE,
+		&GUID_DEVINTERFACE_USB_HUB,
+	} {
+		found, err := enumerateWithGUID(guid)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		for _, dev := range found {
+			key := strings.ToLower(dev.DevicePath)
+			if seen[key] {
+				continue
+			}
+
+			// Root hubs expose no vendor or product ID in their device path,
+			// so they would appear as 0000:0000 with no descriptor. Skip them
+			// until they can be described from the host controller.
+			if strings.Contains(key, "root_hub") {
+				continue
+			}
+
+			seen[key] = true
+			devices = append(devices, dev)
+		}
 	}
-	return devices, err
+
+	// Only report an error when nothing at all could be enumerated.
+	if len(devices) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return devices, nil
 }
 
 func enumerateWithGUID(guid *windows.GUID) ([]*WindowsUSBDevice, error) {

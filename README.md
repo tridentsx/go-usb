@@ -241,7 +241,7 @@ method cannot be added to one platform without the others.
 
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
-| Device enumeration | sysfs | IOKit | SetupAPI + WinUSB |
+| Device enumeration | sysfs | IOKit | SetupAPI (all devices) |
 | Control / bulk / interrupt transfers | yes | yes | yes |
 | Isochronous transfers | yes (usbfs URBs) | yes (IOKit) | `ErrNotSupported` |
 | Asynchronous transfers | yes (`AsyncTransfer`) | yes (`AsyncTransfer`) | not yet |
@@ -251,6 +251,14 @@ method cannot be added to one platform without the others.
 | `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
 | Hotplug notifications | no | no | no |
+
+### Opening devices on Windows
+
+`DeviceList` reports every USB device, matching Linux and macOS. Opening one for
+I/O is a separate matter: WinUSB must be the device's function driver. A device
+owned by another driver enumerates, and reports its vendor and product ID, but
+`Device.Open` will fail. Use a tool such as Zadig, or ship an INF, to bind
+WinUSB to the device you intend to talk to.
 
 ### Accessing HID devices
 
