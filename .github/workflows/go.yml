@@ -7,8 +7,15 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  # Native jobs. macOS cannot be cross-compiled from Linux because the IOKit
+  # backend requires CGO, so it needs its own runner.
+  native:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
     steps:
     - uses: actions/checkout@v4
 
@@ -20,5 +27,45 @@ jobs:
     - name: Build
       run: go build -v ./...
 
+    - name: Vet
+      run: go vet ./...
+
     - name: Test
       run: go test -v ./...
+
+  # The Windows backend is pure Go (golang.org/x/sys/windows lazy DLL loading),
+  # so it cross-compiles without CGO and does not need a Windows runner to be
+  # type-checked.
+  cross-compile:
+    name: cross-compile ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - goos: windows
+          goarch: amd64
+        - goos: windows
+          goarch: arm64
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: '0'
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.25'
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Vet
+      run: go vet ./...
+
+    # Tests cannot run on a foreign GOOS, but compiling them still catches
+    # signature drift between the platform backends and the shared tests.
+    - name: Compile tests
+      run: go test -c -o /dev/null .
