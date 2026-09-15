@@ -2,6 +2,7 @@ package usb
 
 import (
 	"regexp"
+	"time"
 )
 
 // Compatibility methods for Linux to match cross-platform API
@@ -85,6 +86,44 @@ func IsValidDevicePath(path string) bool {
 		addr = addr*10 + int(c-'0')
 	}
 	return bus >= 1 && bus <= 255 && addr >= 1 && addr <= 255
+}
+
+// OpenDeviceWithPath opens the USB device at the given usbfs path, for example
+// "/dev/bus/usb/001/002".
+func OpenDeviceWithPath(path string) (*DeviceHandle, error) {
+	if !IsValidDevicePath(path) {
+		return nil, ErrInvalidParameter
+	}
+
+	devices, err := DeviceList()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, dev := range devices {
+		if dev.Path == path {
+			return dev.Open()
+		}
+	}
+	return nil, ErrDeviceNotFound
+}
+
+// HandleEvents services pending asynchronous transfer completions.
+//
+// Linux reaps completions on a background goroutine started when the device is
+// opened, so there is nothing for callers to drive and this returns nil. It
+// exists so that portable code can call it unconditionally; on macOS it pumps
+// the CFRunLoop that IOKit callbacks are delivered on.
+func HandleEvents(timeout time.Duration) error {
+	return nil
+}
+
+// RunEventLoop services asynchronous transfer completions until stop is closed.
+//
+// As with HandleEvents, Linux needs no caller-driven loop, so this returns as
+// soon as stop is closed.
+func RunEventLoop(stop <-chan struct{}) {
+	<-stop
 }
 
 // GetConfiguration gets the current device configuration

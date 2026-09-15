@@ -1,7 +1,9 @@
 package usb
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,6 +43,13 @@ func (e *SysfsEnumerator) EnumerateDevices() ([]*SysfsDevice, error) {
 	sysfsDir := "/sys/bus/usb/devices"
 	entries, err := os.ReadDir(sysfsDir)
 	if err != nil {
+		// A missing sysfs USB tree means the kernel has no USB support
+		// compiled in, or that we are somewhere without it such as a
+		// container or WSL2. That is "no devices", not a failure, and it
+		// matches what the macOS backend reports when IOKit finds nothing.
+		if errors.Is(err, fs.ErrNotExist) {
+			return []*SysfsDevice{}, nil
+		}
 		return nil, fmt.Errorf("failed to read sysfs USB directory: %w", err)
 	}
 

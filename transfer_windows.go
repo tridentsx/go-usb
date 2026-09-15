@@ -26,9 +26,6 @@ type Transfer struct {
 	mu           sync.Mutex
 }
 
-// TransferCallback is the callback function type for async transfers
-type TransferCallback func(transfer *Transfer)
-
 // ControlTransfer performs a USB control transfer
 func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index uint16, data []byte, timeout time.Duration) (int, error) {
 	h.mu.RLock()
@@ -245,13 +242,6 @@ func (h *DeviceHandle) IsochronousTransfer(endpoint uint8, data []byte, numPacke
 	return nil, ErrNotSupported
 }
 
-// IsoPacketResult represents the result of an isochronous packet
-type IsoPacketResult struct {
-	Length       int
-	ActualLength int
-	Status       int
-}
-
 // SubmitTransfer submits an async transfer (not implemented)
 func (h *DeviceHandle) SubmitTransfer(transfer *Transfer) error {
 	return ErrNotSupported
@@ -303,6 +293,40 @@ func (t *Transfer) SetUserData(userdata interface{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.userdata = userdata
+}
+
+// GetUserData returns the value previously set with SetUserData.
+func (t *Transfer) GetUserData() interface{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.userdata
+}
+
+// Submit queues the transfer on its device handle.
+func (t *Transfer) Submit() error {
+	if t.handle == nil {
+		return ErrInvalidParameter
+	}
+	return t.handle.SubmitTransfer(t)
+}
+
+// Cancel requests cancellation of a previously submitted transfer.
+func (t *Transfer) Cancel() error {
+	if t.handle == nil {
+		return ErrInvalidParameter
+	}
+	return t.handle.CancelTransfer(t)
+}
+
+// Free releases the transfer's buffer.
+//
+// The transfer must not be in flight. Calling Free more than once is safe.
+func (t *Transfer) Free() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buffer = nil
+	t.callback = nil
+	t.userdata = nil
 }
 
 func (t *Transfer) Status() TransferStatus {

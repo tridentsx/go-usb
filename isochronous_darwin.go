@@ -82,7 +82,10 @@ type IsochronousTransfer struct {
 	packetStatuses []int
 }
 
-// NewIsochronousTransfer creates a new isochronous transfer
+// NewIsochronousTransfer creates a new isochronous transfer.
+//
+// Deprecated: use DeviceHandle.NewIsochronousTransfer, which is the form used
+// on every platform and reports errors.
 func NewIsochronousTransfer(handle *DeviceHandle, endpoint uint8, numPackets int, packetSize int) *IsochronousTransfer {
 	totalSize := numPackets * packetSize
 	frameList := make([]C.IOUSBIsocFrame, numPackets)
@@ -133,7 +136,9 @@ func (t *IsochronousTransfer) SetPacketLength(packet int, length int) error {
 	return nil
 }
 
-// GetPacketData returns the data for a specific packet
+// GetPacketData returns the data for a specific packet.
+//
+// Deprecated: use IsoPacketBuffer.
 func (t *IsochronousTransfer) GetPacketData(packet int) ([]byte, error) {
 	if packet < 0 || packet >= t.numPackets {
 		return nil, fmt.Errorf("packet index %d out of range", packet)
@@ -294,7 +299,9 @@ func (t *IsochronousTransfer) ActualLength() int {
 	return t.actualLength
 }
 
-// GetPacketStatus returns the status of a specific packet
+// GetPacketStatus returns the status of a specific packet.
+//
+// Deprecated: use Packets and read IsoPacketDescriptor.Status.
 func (t *IsochronousTransfer) GetPacketStatus(packet int) (int, error) {
 	if packet < 0 || packet >= t.numPackets {
 		return 0, fmt.Errorf("packet index %d out of range", packet)
@@ -302,7 +309,9 @@ func (t *IsochronousTransfer) GetPacketStatus(packet int) (int, error) {
 	return t.packetStatuses[packet], nil
 }
 
-// GetPacketActualLength returns the actual length transferred for a packet
+// GetPacketActualLength returns the actual length transferred for a packet.
+//
+// Deprecated: use Packets and read IsoPacketDescriptor.ActualLength.
 func (t *IsochronousTransfer) GetPacketActualLength(packet int) (int, error) {
 	if packet < 0 || packet >= t.numPackets {
 		return 0, fmt.Errorf("packet index %d out of range", packet)

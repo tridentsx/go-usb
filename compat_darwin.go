@@ -223,11 +223,13 @@ func (h *DeviceHandle) NewIsochronousTransfer(endpoint uint8, numPackets, packet
 	return NewIsochronousTransfer(h, endpoint, numPackets, packetSize), nil
 }
 
-// BulkTransferWithOptions performs a bulk transfer with options (simplified implementation)
-func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, timeout time.Duration, options int) (int, error) {
-	// Options are not directly supported on macOS, just do regular bulk transfer
-	_ = options
-	return h.BulkTransfer(endpoint, data, timeout)
+// BulkTransferWithOptions performs a bulk transfer, optionally allowing a
+// zero-length packet.
+//
+// Matching the Linux backend, an empty data slice is rejected with
+// ErrInvalidParameter unless allowZeroLength is true.
+func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, timeout time.Duration, allowZeroLength bool) (int, error) {
+	return h.bulkTransfer(endpoint, data, timeout, allowZeroLength)
 }
 
 // InterruptTransferWithRetry performs an interrupt transfer with retry (simplified implementation)
@@ -244,4 +246,157 @@ func (h *DeviceHandle) InterruptTransferWithRetry(endpoint uint8, data []byte, t
 		}
 	}
 	return 0, lastErr
+}
+
+// SetShortPacketMode configures whether short packets are treated as errors.
+//
+// This is a usbfs feature with no IOKit counterpart, so it reports
+// ErrNotSupported.
+func (h *DeviceHandle) SetShortPacketMode(enabled bool) error {
+	return ErrNotSupported
+}
+
+// SubmitHighBandwidthIso submits a high-bandwidth isochronous transfer.
+//
+// IOKit exposes no equivalent of the usbfs high-bandwidth iso path, so this
+// reports ErrNotSupported. Use NewIsochronousTransfer instead.
+func (h *DeviceHandle) SubmitHighBandwidthIso(transfer *HighBandwidthIsoTransfer, callback func([]byte, error)) error {
+	return ErrNotSupported
+}
+
+// --- Canonical asynchronous transfer API -------------------------------------
+//
+// These live here, rather than in the CGO-dependent files, so that they stay
+// aligned with the cross-platform contract asserted in api_contract_unix.go.
+
+// NewBulkTransfer creates an asynchronous bulk transfer.
+func (h *DeviceHandle) NewBulkTransfer(endpoint uint8, bufferSize int) (*AsyncTransfer, error) {
+	return h.newAsyncTransfer(endpoint, TransferTypeBulk, bufferSize)
+}
+
+// NewInterruptTransfer creates an asynchronous interrupt transfer.
+func (h *DeviceHandle) NewInterruptTransfer(endpoint uint8, bufferSize int) (*AsyncTransfer, error) {
+	return h.newAsyncTransfer(endpoint, TransferTypeInterrupt, bufferSize)
+}
+
+// NewControlTransfer creates an asynchronous control transfer.
+func (h *DeviceHandle) NewControlTransfer(bufferSize int) (*AsyncTransfer, error) {
+	return h.newAsyncTransfer(0, TransferTypeControl, bufferSize)
+}
+
+func (h *DeviceHandle) newAsyncTransfer(endpoint uint8, transferType TransferType, bufferSize int) (*AsyncTransfer, error) {
+	h.mu.RLock()
+	closed := h.closed
+	h.mu.RUnlock()
+
+	if closed {
+		return nil, ErrDeviceNotFound
+	}
+	if bufferSize < 0 {
+		return nil, ErrInvalidParameter
+	}
+	return NewAsyncTransfer(h, endpoint, transferType, bufferSize), nil
+}
+
+// Wait blocks until the transfer completes.
+func (t *AsyncTransfer) Wait() error {
+	return t.waitUntil(time.Time{})
+}
+
+// WaitWithTimeout blocks until the transfer completes or the timeout elapses,
+// in which case it returns ErrTimeout.
+func (t *AsyncTransfer) WaitWithTimeout(timeout time.Duration) error {
+	return t.waitUntil(time.Now().Add(timeout))
+}
+
+// waitUntil polls for completion. A zero deadline waits indefinitely.
+//
+// IOKit signals completion from a CFRunLoop callback, so this cannot block on
+// the submitting goroutine; polling keeps the run loop free to dispatch.
+func (t *AsyncTransfer) waitUntil(deadline time.Time) error {
+	const pollInterval = 10 * time.Millisecond
+
+	for {
+		t.mutex.Lock()
+		completed := t.completed
+		t.mutex.Unlock()
+
+		if completed {
+			return nil
+		}
+
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return ErrTimeout
+		}
+
+		time.Sleep(pollInterval)
+	}
+}
+
+// Fill copies data into the transfer's buffer, resizing it if necessary.
+func (t *AsyncTransfer) Fill(data []byte) error {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	if t.submitted && !t.completed {
+		return ErrDeviceBusy
+	}
+
+	if len(data) > len(t.buffer) {
+		t.buffer = make([]byte, len(data))
+	} else {
+		t.buffer = t.buffer[:len(data)]
+	}
+	copy(t.buffer, data)
+	return nil
+}
+
+// --- Canonical isochronous transfer API --------------------------------------
+
+// Buffer returns the transfer's data buffer.
+func (t *IsochronousTransfer) Buffer() []byte {
+	return t.buffer
+}
+
+// Packets returns a descriptor per isochronous packet.
+func (t *IsochronousTransfer) Packets() []IsoPacketDescriptor {
+	packets := make([]IsoPacketDescriptor, t.numPackets)
+	for i := range packets {
+		packets[i] = IsoPacketDescriptor{
+			Length:       uint32(t.packetSize),
+			ActualLength: uint32(t.packetLengths[i]),
+			Status:       int32(t.packetStatuses[i]),
+		}
+	}
+	return packets
+}
+
+// IsoPacketBuffer returns the data for a single isochronous packet.
+func (t *IsochronousTransfer) IsoPacketBuffer(packetIndex int) ([]byte, error) {
+	if packetIndex < 0 || packetIndex >= t.numPackets {
+		return nil, ErrInvalidParameter
+	}
+
+	start := packetIndex * t.packetSize
+	end := start + t.packetLengths[packetIndex]
+	if end > len(t.buffer) {
+		end = len(t.buffer)
+	}
+	if start > end {
+		return nil, ErrInvalidParameter
+	}
+	return t.buffer[start:end], nil
+}
+
+// IsoPacketBufferSlices returns one slice per isochronous packet.
+func (t *IsochronousTransfer) IsoPacketBufferSlices() [][]byte {
+	slices := make([][]byte, 0, t.numPackets)
+	for i := 0; i < t.numPackets; i++ {
+		buf, err := t.IsoPacketBuffer(i)
+		if err != nil {
+			break
+		}
+		slices = append(slices, buf)
+	}
+	return slices
 }

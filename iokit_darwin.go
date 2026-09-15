@@ -216,6 +216,12 @@ func (e *IOKitEnumerator) EnumerateDevices() ([]*Device, error) {
 		product := C.GoString(C.GetStringProperty(device, C.CString("USB Product Name")))
 		serial := C.GoString(C.GetStringProperty(device, C.CString("USB Serial Number")))
 
+		devStrings := &DeviceStrings{
+			Manufacturer: manufacturer,
+			Product:      product,
+			Serial:       serial,
+		}
+
 		usbDev := &Device{
 			Path:       fmt.Sprintf("iokit:%08x", locationID),
 			Bus:        bus,
@@ -229,11 +235,8 @@ func (e *IOKitEnumerator) EnumerateDevices() ([]*Device, error) {
 				Bus:        bus,
 				Address:    address,
 			},
-			CachedStrings: &CachedStrings{
-				Manufacturer: manufacturer,
-				Product:      product,
-				Serial:       serial,
-			},
+			CachedStrings: devStrings,
+			SysfsStrings:  devStrings,
 		}
 
 		devices = append(devices, usbDev)
@@ -252,20 +255,31 @@ func (e *IOKitEnumerator) EnumerateDevices() ([]*Device, error) {
 
 // Device represents a USB device on macOS
 type Device struct {
-	Path          string
-	Bus           uint8
-	Address       uint8
-	Descriptor    DeviceDescriptor
-	IOKitDevice   *IOKitDevice
+	Path        string
+	Bus         uint8
+	Address     uint8
+	Descriptor  DeviceDescriptor
+	IOKitDevice *IOKitDevice
+
+	// Configs holds the raw configuration descriptor headers, populated on
+	// demand by GetConfigDescriptor. Present on every platform.
+	Configs []RawConfigDescriptor
+
+	// SysfsStrings holds the string descriptors cached during enumeration. The
+	// name is shared with the other platforms; see DeviceStrings.
+	SysfsStrings *SysfsStrings
+
+	// CachedStrings is the historical macOS-only name for SysfsStrings and
+	// points at the same value.
+	//
+	// Deprecated: use SysfsStrings, which exists on every platform.
 	CachedStrings *CachedStrings
 }
 
-// CachedStrings holds cached string descriptors
-type CachedStrings struct {
-	Manufacturer string
-	Product      string
-	Serial       string
-}
+// CachedStrings is the historical macOS-only name for DeviceStrings.
+//
+// Deprecated: use DeviceStrings instead.
+type CachedStrings = DeviceStrings
 
 // DeviceListOption is a functional option for configuring DeviceList behavior.
 type DeviceListOption func(*deviceListOptions)
@@ -400,9 +414,6 @@ func IsValidDevicePath(path string) bool {
 
 // SysfsDevice is not used on macOS but included for compatibility
 type SysfsDevice struct{}
-
-// SysfsStrings is not used on macOS but included for compatibility
-type SysfsStrings struct{}
 
 // ToUSBDevice is not implemented on macOS
 func (s *SysfsDevice) ToUSBDevice() *Device {

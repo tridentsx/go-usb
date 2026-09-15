@@ -44,12 +44,8 @@ type Device struct {
 	SysfsStrings *SysfsStrings
 }
 
-// SysfsStrings holds cached sysfs string descriptors
-type SysfsStrings struct {
-	Manufacturer string
-	Product      string
-	Serial       string
-}
+// SysfsStrings is declared in types_common.go as an alias for DeviceStrings so
+// that every platform exposes the same type.
 
 type DeviceHandle struct {
 	device        *Device

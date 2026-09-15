@@ -1,3 +1,8 @@
+//go:build darwin && usbdebug
+
+// This file holds macOS-only diagnostic helpers. It is excluded from normal
+// builds; enable it with -tags usbdebug when investigating IOKit enumeration.
+
 package usb
 
 /*

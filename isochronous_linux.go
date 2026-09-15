@@ -28,13 +28,6 @@ const (
 // MAX_BULK_BUFFER_LENGTH matches libusb's limit to avoid kernel memory issues on Android
 const MAX_BULK_BUFFER_LENGTH = 16384
 
-// IsoPacketDescriptor represents a single isochronous packet
-type IsoPacketDescriptor struct {
-	Length       uint32
-	ActualLength uint32
-	Status       int32
-}
-
 // URB represents a USB Request Block for kernel communication
 type URB struct {
 	Type         uint8
@@ -259,10 +252,42 @@ func (t *IsochronousTransfer) ActualLength() int {
 	return int(t.urb.ActualLength)
 }
 
-// Status returns the transfer status
-func (t *IsochronousTransfer) Status() int32 {
+// Status returns the transfer status.
+//
+// Use RawStatus to obtain the kernel's numeric URB status instead.
+func (t *IsochronousTransfer) Status() TransferStatus {
+	t.waitForReaping()
+	return transferStatusFromURBStatus(t.urb.Status)
+}
+
+// RawStatus returns the kernel's raw URB status, which is 0 on success and a
+// negative errno otherwise.
+func (t *IsochronousTransfer) RawStatus() int32 {
 	t.waitForReaping()
 	return t.urb.Status
+}
+
+// transferStatusFromURBStatus maps a usbfs URB status onto the portable
+// TransferStatus values.
+func transferStatusFromURBStatus(status int32) TransferStatus {
+	switch status {
+	case 0:
+		return TransferCompleted
+	case -int32(syscall.ETIMEDOUT):
+		return TransferTimedOut
+	case -int32(syscall.ENOENT), -int32(syscall.ECONNRESET):
+		return TransferCancelled
+	case -int32(syscall.EPIPE):
+		return TransferStall
+	case -int32(syscall.ENODEV), -int32(syscall.ESHUTDOWN):
+		return TransferNoDevice
+	case -int32(syscall.EOVERFLOW):
+		return TransferOverflow
+	case -int32(syscall.EINPROGRESS):
+		return TransferInProgress
+	default:
+		return TransferError
+	}
 }
 
 // IsoPacketBuffer returns the data buffer for a specific isochronous packet.

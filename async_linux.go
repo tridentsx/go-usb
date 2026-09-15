@@ -241,6 +241,30 @@ func (t *AsyncTransfer) Cancel() error {
 	return nil
 }
 
+// NewAsyncTransfer creates a new asynchronous transfer.
+//
+// Deprecated: use DeviceHandle.NewBulkTransfer, NewInterruptTransfer or
+// NewControlTransfer, which report allocation errors.
+func NewAsyncTransfer(handle *DeviceHandle, endpoint uint8, transferType TransferType, bufferSize int) *AsyncTransfer {
+	transfer, err := handle.newAsyncTransfer(endpoint, transferType, bufferSize, 0)
+	if err != nil {
+		return nil
+	}
+	return transfer
+}
+
+// IsCompleted reports whether the transfer has been reaped.
+//
+// Unlike Status or ActualLength it never blocks, so it is safe to poll.
+func (t *AsyncTransfer) IsCompleted() bool {
+	if t.reapCond == nil {
+		return false
+	}
+	t.reapCond.L.Lock()
+	defer t.reapCond.L.Unlock()
+	return t.reaped
+}
+
 // waitForReaping waits for the transfer to be reaped
 func (t *AsyncTransfer) waitForReaping() {
 	t.reapCond.L.Lock()

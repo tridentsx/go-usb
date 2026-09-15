@@ -120,25 +120,8 @@ func (t *AsyncTransfer) Submit() error {
 	return nil
 }
 
-// Wait waits for the transfer to complete
-func (t *AsyncTransfer) Wait(timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-
-	for {
-		t.mutex.Lock()
-		if t.completed {
-			t.mutex.Unlock()
-			return nil
-		}
-		t.mutex.Unlock()
-
-		if time.Now().After(deadline) {
-			return ErrTimeout
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
-}
+// Wait and WaitWithTimeout are defined in compat_darwin.go so that they stay in
+// step with the cross-platform contract.
 
 // Cancel cancels the async transfer
 func (t *AsyncTransfer) Cancel() error {

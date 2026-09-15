@@ -73,7 +73,7 @@ func (h *DeviceHandle) SetConfiguration(config int) error {
 	defer h.mu.Unlock()
 
 	if h.closed {
-		return fmt.Errorf("device is closed")
+		return ErrDeviceNotFound
 	}
 
 	return h.devInterface.SetConfiguration(uint8(config))
@@ -85,7 +85,7 @@ func (h *DeviceHandle) GetConfiguration() (int, error) {
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return 0, fmt.Errorf("device is closed")
+		return 0, ErrDeviceNotFound
 	}
 
 	config, err := h.devInterface.GetConfiguration()
@@ -98,7 +98,7 @@ func (h *DeviceHandle) ClaimInterface(iface uint8) error {
 	defer h.mu.Unlock()
 
 	if h.closed {
-		return fmt.Errorf("device is closed")
+		return ErrDeviceNotFound
 	}
 
 	if h.claimedIfaces[iface] {
@@ -119,7 +119,7 @@ func (h *DeviceHandle) ReleaseInterface(iface uint8) error {
 	defer h.mu.Unlock()
 
 	if h.closed {
-		return fmt.Errorf("device is closed")
+		return ErrDeviceNotFound
 	}
 
 	return h.releaseInterfaceInternal(iface)
@@ -147,7 +147,7 @@ func (h *DeviceHandle) SetAltSetting(iface, altSetting uint8) error {
 	defer h.mu.Unlock()
 
 	if h.closed {
-		return fmt.Errorf("device is closed")
+		return ErrDeviceNotFound
 	}
 
 	if !h.claimedIfaces[iface] {
@@ -168,7 +168,7 @@ func (h *DeviceHandle) ClearHalt(endpoint uint8) error {
 	defer h.mu.Unlock()
 
 	if h.closed {
-		return fmt.Errorf("device is closed")
+		return ErrDeviceNotFound
 	}
 
 	// Determine interface from endpoint
@@ -191,31 +191,44 @@ func (h *DeviceHandle) ResetDevice() error {
 	defer h.mu.Unlock()
 
 	if h.closed {
-		return fmt.Errorf("device is closed")
+		return ErrDeviceNotFound
 	}
 
 	return h.devInterface.ResetDevice()
 }
 
-// KernelDriverActive checks if a kernel driver is active for an interface
+// KernelDriverActive reports whether a kernel driver holds the interface.
+//
+// IOKit does not expose driver bindings the way Linux does: the only signal is
+// that ClaimInterface fails when the system owns the interface. This therefore
+// reports false, and callers should treat a ClaimInterface failure as the
+// authoritative answer.
 func (h *DeviceHandle) KernelDriverActive(iface uint8) (bool, error) {
-	// macOS doesn't expose this in the same way as Linux
-	// Interfaces claimed by the system will fail to open
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed {
+		return false, ErrDeviceNotFound
+	}
+
 	return false, nil
 }
 
-// DetachKernelDriver detaches the kernel driver from an interface
+// DetachKernelDriver detaches the kernel driver from an interface.
+//
+// macOS provides no user-space way to unbind a kernel driver, so this always
+// reports ErrNotSupported rather than pretending to have detached anything.
+// Compare Linux, where this really does issue USBDEVFS_DISCONNECT.
 func (h *DeviceHandle) DetachKernelDriver(iface uint8) error {
-	// Not directly supported on macOS
-	// The system manages drivers differently
-	return nil
+	return ErrNotSupported
 }
 
-// AttachKernelDriver re-attaches the kernel driver to an interface
+// AttachKernelDriver re-attaches the kernel driver to an interface.
+//
+// macOS provides no user-space way to rebind a kernel driver, so this always
+// reports ErrNotSupported.
 func (h *DeviceHandle) AttachKernelDriver(iface uint8) error {
-	// Not directly supported on macOS
-	// The system manages drivers differently
-	return nil
+	return ErrNotSupported
 }
 
 // StringDescriptor retrieves a string descriptor from the device
@@ -224,7 +237,7 @@ func (h *DeviceHandle) StringDescriptor(index uint8) (string, error) {
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return "", fmt.Errorf("device is closed")
+		return "", ErrDeviceNotFound
 	}
 
 	// First get language ID (index 0)
@@ -277,7 +290,7 @@ func (h *DeviceHandle) GetDeviceDescriptor() (*DeviceDescriptor, error) {
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return nil, fmt.Errorf("device is closed")
+		return nil, ErrDeviceNotFound
 	}
 
 	return h.devInterface.GetDeviceDescriptor()
@@ -289,7 +302,7 @@ func (h *DeviceHandle) GetActiveConfigDescriptor() (*ConfigDescriptor, error) {
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return nil, fmt.Errorf("device is closed")
+		return nil, ErrDeviceNotFound
 	}
 
 	// Get current configuration
@@ -312,7 +325,7 @@ func (h *DeviceHandle) GetConfigDescriptor(index uint8) (*ConfigDescriptor, erro
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return nil, fmt.Errorf("device is closed")
+		return nil, ErrDeviceNotFound
 	}
 
 	// First get the configuration descriptor header
@@ -436,7 +449,7 @@ func (h *DeviceHandle) GetBOSDescriptor() (*BOSDescriptor, []DeviceCapabilityDes
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return nil, nil, fmt.Errorf("device is closed")
+		return nil, nil, ErrDeviceNotFound
 	}
 
 	// First get BOS descriptor header
@@ -506,7 +519,7 @@ func (h *DeviceHandle) GetDeviceQualifierDescriptor() (*DeviceQualifierDescripto
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return nil, fmt.Errorf("device is closed")
+		return nil, ErrDeviceNotFound
 	}
 
 	buf := make([]byte, 10)

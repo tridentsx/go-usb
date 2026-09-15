@@ -5,16 +5,13 @@ import (
 	"time"
 )
 
-// ErrTimeout represents a timeout error
-var ErrTimeout = fmt.Errorf("transfer timed out")
-
 // ControlTransfer performs a control transfer on the device
 func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index uint16, data []byte, timeout time.Duration) (int, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return 0, fmt.Errorf("device is closed")
+		return 0, ErrDeviceNotFound
 	}
 
 	timeoutMs := uint32(timeout.Milliseconds())
@@ -25,13 +22,27 @@ func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index 
 	return h.devInterface.ControlTransfer(requestType, request, value, index, data, timeoutMs)
 }
 
-// BulkTransfer performs a bulk transfer on an endpoint
+// BulkTransfer performs a bulk transfer on an endpoint.
+//
+// A zero-length data slice is rejected with ErrInvalidParameter; use
+// BulkTransferWithOptions to permit zero-length packets.
 func (h *DeviceHandle) BulkTransfer(endpoint uint8, data []byte, timeout time.Duration) (int, error) {
+	return h.bulkTransfer(endpoint, data, timeout, false)
+}
+
+// bulkTransfer is the shared implementation behind BulkTransfer and
+// BulkTransferWithOptions.
+func (h *DeviceHandle) bulkTransfer(endpoint uint8, data []byte, timeout time.Duration, allowZeroLength bool) (int, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	if h.closed {
-		return 0, fmt.Errorf("device is closed")
+		return 0, ErrDeviceNotFound
+	}
+
+	// Handle zero-length packets
+	if len(data) == 0 && !allowZeroLength {
+		return 0, ErrInvalidParameter
 	}
 
 	// Determine interface from endpoint
@@ -76,9 +87,10 @@ type Transfer struct {
 	endpoint     uint8
 	transferType TransferType
 	buffer       []byte
+	timeout      time.Duration
 	status       TransferStatus
 	actualLength int
-	callback     func(*Transfer)
+	callback     TransferCallback
 	userData     interface{}
 }
 
@@ -89,12 +101,23 @@ func NewTransfer(handle *DeviceHandle, endpoint uint8, transferType TransferType
 		endpoint:     endpoint,
 		transferType: transferType,
 		buffer:       make([]byte, bufferSize),
+		timeout:      5 * time.Second,
 		status:       TransferError,
 	}
 }
 
+// SetBuffer replaces the transfer's data buffer.
+func (t *Transfer) SetBuffer(data []byte) {
+	t.buffer = data
+}
+
+// SetTimeout sets the timeout applied when the transfer is submitted.
+func (t *Transfer) SetTimeout(timeout time.Duration) {
+	t.timeout = timeout
+}
+
 // SetCallback sets the transfer callback
-func (t *Transfer) SetCallback(callback func(*Transfer)) {
+func (t *Transfer) SetCallback(callback TransferCallback) {
 	t.callback = callback
 }
 
@@ -208,16 +231,55 @@ type URB struct {
 	UserContext     uintptr
 }
 
-// AllocateStreams allocates bulk streams (USB 3.0+)
-func (h *DeviceHandle) AllocateStreams(numStreams uint32, endpoints []uint8) error {
-	// Stream support would require IOKit USB 3.0 APIs
-	return fmt.Errorf("bulk streams not supported on macOS")
+// AllocStreams allocates bulk streams (USB 3.0+).
+//
+// IOKit exposes no stream API, so this always reports ErrNotSupported.
+func (h *DeviceHandle) AllocStreams(numStreams uint32, endpoints []uint8) error {
+	return ErrNotSupported
 }
 
-// FreeStreams frees bulk streams
+// AllocateStreams allocates bulk streams (USB 3.0+).
+//
+// Deprecated: use AllocStreams, which is the name used on every platform.
+func (h *DeviceHandle) AllocateStreams(numStreams uint32, endpoints []uint8) error {
+	return h.AllocStreams(numStreams, endpoints)
+}
+
+// FreeStreams releases bulk streams (USB 3.0+).
+//
+// IOKit exposes no stream API, so this always reports ErrNotSupported.
 func (h *DeviceHandle) FreeStreams(endpoints []uint8) error {
-	// Stream support would require IOKit USB 3.0 APIs
-	return fmt.Errorf("bulk streams not supported on macOS")
+	return ErrNotSupported
+}
+
+// CancelTransfer requests cancellation of a previously submitted transfer.
+//
+// IOKit cancellation is per pipe rather than per transfer, so this aborts the
+// pipe the transfer was submitted on.
+func (h *DeviceHandle) CancelTransfer(transfer *Transfer) error {
+	if transfer == nil {
+		return ErrInvalidParameter
+	}
+	return transfer.Cancel()
+}
+
+// IsochronousTransfer performs a one-shot isochronous transfer.
+//
+// The macOS backend drives isochronous traffic through IsochronousTransfer
+// objects instead; use NewIsochronousTransfer.
+func (h *DeviceHandle) IsochronousTransfer(endpoint uint8, data []byte, numPackets int, packetSize int, timeout time.Duration) ([]IsoPacketResult, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed {
+		return nil, ErrDeviceNotFound
+	}
+
+	if numPackets <= 0 || packetSize <= 0 {
+		return nil, ErrInvalidParameter
+	}
+
+	return nil, ErrNotSupported
 }
 
 // Control transfer helpers
@@ -240,10 +302,12 @@ func (h *DeviceHandle) GetStatus(recipient, index uint16) (uint16, error) {
 	return uint16(buf[0]) | (uint16(buf[1]) << 8), nil
 }
 
-// ClearFeature performs a CLEAR_FEATURE control request
-func (h *DeviceHandle) ClearFeature(recipient, feature, index uint16) error {
+// ClearFeature performs a CLEAR_FEATURE control request.
+//
+// requestType is the full bmRequestType byte, matching the other backends.
+func (h *DeviceHandle) ClearFeature(requestType uint8, feature uint16, index uint16) error {
 	_, err := h.ControlTransfer(
-		uint8(recipient)&0x1F, // OUT, standard, recipient
+		requestType,
 		USB_REQ_CLEAR_FEATURE,
 		feature,
 		index,
@@ -253,10 +317,12 @@ func (h *DeviceHandle) ClearFeature(recipient, feature, index uint16) error {
 	return err
 }
 
-// SetFeature performs a SET_FEATURE control request
-func (h *DeviceHandle) SetFeature(recipient, feature, index uint16) error {
+// SetFeature performs a SET_FEATURE control request.
+//
+// requestType is the full bmRequestType byte, matching the other backends.
+func (h *DeviceHandle) SetFeature(requestType uint8, feature uint16, index uint16) error {
 	_, err := h.ControlTransfer(
-		uint8(recipient)&0x1F, // OUT, standard, recipient
+		requestType,
 		USB_REQ_SET_FEATURE,
 		feature,
 		index,

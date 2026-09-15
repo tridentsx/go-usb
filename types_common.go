@@ -75,6 +75,60 @@ const (
 	TransferInProgress
 )
 
+// TransferCallback is invoked when an asynchronous transfer completes.
+//
+// It is declared here rather than per platform so that every backend's
+// Transfer.SetCallback has an identical signature.
+type TransferCallback func(transfer *Transfer)
+
+// IsoPacketDescriptor describes one packet of an isochronous transfer.
+//
+// Length is the requested size, ActualLength the number of bytes the host
+// controller actually moved, and Status the platform's raw per-packet status
+// code (0 on success).
+type IsoPacketDescriptor struct {
+	Length       uint32
+	ActualLength uint32
+	Status       int32
+}
+
+// HighBandwidthIsoTransfer describes a high-bandwidth isochronous transfer,
+// where a single frame carries more than one packet.
+type HighBandwidthIsoTransfer struct {
+	Endpoint        uint8
+	PacketsPerFrame uint8 // 1-3 for high bandwidth
+	PacketSize      uint16
+	NumFrames       uint16
+	Buffer          []byte
+}
+
+// IsoPacketResult reports the outcome of one packet of a one-shot
+// isochronous transfer.
+type IsoPacketResult struct {
+	Length       int
+	ActualLength int
+	Status       int
+}
+
+// DeviceStrings holds the string descriptors cached during device enumeration.
+//
+// Each platform fills this from whichever source is cheapest for it: sysfs on
+// Linux, IOKit registry properties on macOS, and WinUSB descriptor reads on
+// Windows. A field is empty when the platform could not read it, so callers
+// should fall back to DeviceHandle.StringDescriptor when they need a
+// guaranteed value.
+type DeviceStrings struct {
+	Manufacturer string
+	Product      string
+	Serial       string
+}
+
+// SysfsStrings is the historical, Linux-flavoured name for DeviceStrings.
+//
+// Deprecated: use DeviceStrings instead. This alias is retained so that
+// existing callers, and the Device.SysfsStrings field, keep compiling.
+type SysfsStrings = DeviceStrings
+
 // DeviceDescriptor represents a USB device descriptor
 type DeviceDescriptor struct {
 	Length            uint8

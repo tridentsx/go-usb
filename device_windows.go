@@ -98,12 +98,8 @@ type winusbPipeInformation struct {
 // WinUSB handle type
 type winusbInterfaceHandle uintptr
 
-// SysfsStrings holds cached string descriptors (named for Linux compatibility)
-type SysfsStrings struct {
-	Manufacturer string
-	Product      string
-	Serial       string
-}
+// SysfsStrings is declared in types_common.go as an alias for DeviceStrings so
+// that every platform exposes the same type.
 
 // Device represents a USB device on Windows
 type Device struct {
@@ -360,16 +356,22 @@ func (h *DeviceHandle) ClearHalt(endpoint uint8) error {
 	return nil
 }
 
-// DetachKernelDriver detaches kernel driver (no-op on Windows as WinUSB handles this)
+// DetachKernelDriver detaches the kernel driver from an interface.
+//
+// Windows binds a function driver at install time; there is no user-space way
+// to unbind it, so this always reports ErrNotSupported rather than pretending
+// to have detached anything. Compare Linux, where this really does issue
+// USBDEVFS_DISCONNECT.
 func (h *DeviceHandle) DetachKernelDriver(iface uint8) error {
-	// On Windows, WinUSB replaces the kernel driver automatically
-	return nil
+	return ErrNotSupported
 }
 
-// AttachKernelDriver re-attaches kernel driver (no-op on Windows)
+// AttachKernelDriver re-attaches the kernel driver to an interface.
+//
+// Rebinding a driver on Windows requires driver installation, so this always
+// reports ErrNotSupported.
 func (h *DeviceHandle) AttachKernelDriver(iface uint8) error {
-	// On Windows, this would require driver reinstallation
-	return nil
+	return ErrNotSupported
 }
 
 // StringDescriptor reads a string descriptor
@@ -748,6 +750,51 @@ func (h *DeviceHandle) ClearFeature(requestType uint8, feature uint16, index uin
 
 	_, err := h.controlTransferInternal(requestType, USB_REQ_CLEAR_FEATURE, feature, index, nil, 5*time.Second)
 	return err
+}
+
+// SetDescriptor issues a SET_DESCRIPTOR standard request.
+func (h *DeviceHandle) SetDescriptor(descType uint8, descIndex uint8, langID uint16, data []byte) error {
+	value := (uint16(descType) << 8) | uint16(descIndex)
+	_, err := h.ControlTransfer(
+		0x00, // Host-to-device, standard, device
+		USB_REQ_SET_DESCRIPTOR,
+		value,
+		langID,
+		data,
+		5*time.Second,
+	)
+	return err
+}
+
+// SynchFrame issues a SYNCH_FRAME standard request for an isochronous endpoint.
+func (h *DeviceHandle) SynchFrame(endpoint uint8) (uint16, error) {
+	buf := make([]byte, 2)
+	_, err := h.ControlTransfer(
+		0x82, // Device-to-host, standard, endpoint
+		USB_REQ_SYNCH_FRAME,
+		0,
+		uint16(endpoint),
+		buf,
+		5*time.Second,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint16(buf), nil
+}
+
+// AllocStreams allocates bulk streams (USB 3.0+).
+//
+// WinUSB exposes no stream API, so this always reports ErrNotSupported.
+func (h *DeviceHandle) AllocStreams(numStreams uint32, endpoints []uint8) error {
+	return ErrNotSupported
+}
+
+// FreeStreams releases bulk streams (USB 3.0+).
+//
+// WinUSB exposes no stream API, so this always reports ErrNotSupported.
+func (h *DeviceHandle) FreeStreams(endpoints []uint8) error {
+	return ErrNotSupported
 }
 
 // Capabilities returns device capabilities (not available on Windows)

@@ -23,8 +23,6 @@ type Transfer struct {
 	mu           sync.Mutex
 }
 
-type TransferCallback func(transfer *Transfer)
-
 func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index uint16, data []byte, timeout time.Duration) (int, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -184,15 +182,6 @@ func (h *DeviceHandle) SetShortPacketMode(enabled bool) error {
 	return ErrNotSupported
 }
 
-// High-bandwidth isochronous transfer support
-type HighBandwidthIsoTransfer struct {
-	Endpoint        uint8
-	PacketsPerFrame uint8 // 1-3 for high bandwidth
-	PacketSize      uint16
-	NumFrames       uint16
-	Buffer          []byte
-}
-
 // SubmitHighBandwidthIso submits a high-bandwidth isochronous transfer (USB 2.0+)
 func (h *DeviceHandle) SubmitHighBandwidthIso(transfer *HighBandwidthIsoTransfer, callback func([]byte, error)) error {
 	// This would require complex URB handling for high-bandwidth transfers
@@ -217,24 +206,27 @@ func (h *DeviceHandle) IsochronousTransfer(endpoint uint8, data []byte, numPacke
 	return nil, ErrNotSupported
 }
 
-type IsoPacketResult struct {
-	Length       int
-	ActualLength int
-	Status       int
-}
-
+// SubmitTransfer submits a Transfer for asynchronous completion.
+//
+// The usbfs backend drives asynchronous work through AsyncTransfer, which owns
+// the URB lifetime and the reaping goroutine. The Transfer type is currently a
+// synchronous-only value on Linux, so this reports ErrNotSupported; use
+// NewBulkTransfer, NewInterruptTransfer or NewControlTransfer instead.
 func (h *DeviceHandle) SubmitTransfer(transfer *Transfer) error {
-	// TODO: Implement async transfer submission
 	return ErrNotSupported
 }
 
+// CancelTransfer cancels a Transfer submitted with SubmitTransfer.
+//
+// See SubmitTransfer: use AsyncTransfer.Cancel instead.
 func (h *DeviceHandle) CancelTransfer(transfer *Transfer) error {
-	// TODO: Implement async transfer cancellation
 	return ErrNotSupported
 }
 
+// ReapTransfer waits for the next completed Transfer.
+//
+// See SubmitTransfer: use AsyncTransfer.Wait instead.
 func (h *DeviceHandle) ReapTransfer(timeout time.Duration) (*Transfer, error) {
-	// TODO: Implement async transfer completion
 	return nil, ErrNotSupported
 }
 
@@ -272,6 +264,40 @@ func (t *Transfer) SetUserData(userdata interface{}) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.userdata = userdata
+}
+
+// GetUserData returns the value previously set with SetUserData.
+func (t *Transfer) GetUserData() interface{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.userdata
+}
+
+// Submit queues the transfer on its device handle.
+func (t *Transfer) Submit() error {
+	if t.handle == nil {
+		return ErrInvalidParameter
+	}
+	return t.handle.SubmitTransfer(t)
+}
+
+// Cancel requests cancellation of a previously submitted transfer.
+func (t *Transfer) Cancel() error {
+	if t.handle == nil {
+		return ErrInvalidParameter
+	}
+	return t.handle.CancelTransfer(t)
+}
+
+// Free releases the transfer's buffer.
+//
+// The transfer must not be in flight. Calling Free more than once is safe.
+func (t *Transfer) Free() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buffer = nil
+	t.callback = nil
+	t.userdata = nil
 }
 
 func (t *Transfer) Status() TransferStatus {
