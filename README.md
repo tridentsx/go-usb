@@ -4,7 +4,7 @@ A cross-platform Go library for USB device communication, providing a libusb-lik
 
 ## Features
 
-- Cross-platform support (Linux and macOS)
+- Cross-platform support (Linux, macOS and Windows)
 - Pure Go implementation on Linux (no libusb dependency)
 - Native IOKit integration on macOS
 - Device enumeration and management
@@ -23,7 +23,7 @@ go get github.com/kevmo314/go-usb
 
 ## Requirements
 
-- Linux or macOS operating system
+- Linux, macOS or Windows operating system
 - Go 1.21 or higher
 - Appropriate permissions to access USB devices:
   - Linux: Typically requires root or udev rules
@@ -231,12 +231,70 @@ The repository includes several command-line tools and examples in the `cmd/` di
 - **browse-uvc**: Browse USB Video Class devices
 - **verify-transfers**: Test and verify USB transfer operations
 
+## Platform Support Matrix
+
+Every backend implements the same API. Where a platform cannot perform an
+operation it returns `ErrNotSupported` rather than a `nil` error, so a caller
+can always tell the difference between "this worked" and "this is impossible
+here". The contract is asserted at compile time in `api_contract.go`, so a
+method cannot be added to one platform without the others.
+
+| Capability | Linux | macOS | Windows |
+|---|---|---|---|
+| Device enumeration | sysfs | IOKit | SetupAPI + WinUSB |
+| Control / bulk / interrupt transfers | yes | yes | yes |
+| Isochronous transfers | yes (usbfs URBs) | yes (IOKit) | `ErrNotSupported` |
+| Asynchronous transfers | yes (`AsyncTransfer`) | yes (`AsyncTransfer`) | not yet |
+| `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` | `ErrNotSupported`, use `AsyncTransfer` | yes | `ErrNotSupported` |
+| Bulk streams (`AllocStreams`) | yes | `ErrNotSupported` | `ErrNotSupported` |
+| `DetachKernelDriver` / `AttachKernelDriver` | yes (`USBDEVFS_DISCONNECT`) | `ErrNotSupported` | `ErrNotSupported` |
+| `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
+| `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
+| Hotplug notifications | no | no | no |
+
+### Accessing HID devices
+
+This is the one place where the platforms differ in what they can reach rather
+than merely in how they get there.
+
+On Linux you can call `DetachKernelDriver` to unbind `usbhid` and then talk to
+the device with raw transfers, which needs root or a udev rule. On macOS and
+Windows the kernel HID driver owns the device exclusively and there is no
+user-space way to unbind it, so HID devices enumerate but cannot be opened for
+raw I/O. Windows additionally refuses to open keyboards and mice with read or
+write access at all, as an anti-keylogger measure.
+
+The library has no HID-specific backend on any platform.
+
+### `Device.Path` is platform-specific
+
+`Path` is whatever string that platform uses to identify the device, and it is
+not portable:
+
+- Linux: the usbfs node, `/dev/bus/usb/001/002`
+- macOS: an IOKit location, `iokit:14200000`
+- Windows: a device interface path,
+  `\\?\usb#vid_046d&pid_08e5#6&2e5a5a55&0&4#{a5dcbf10-...}`
+
+On Windows this is not the string Device Manager shows. Device Manager displays
+the *device instance path* (`USB\VID_046D&PID_08E5\6&2E5A5A55&0&4`); the
+interface path is that value lowercased, with `\` replaced by `#`, plus the
+interface class GUID.
+
+Use `IsValidDevicePath` to check a path for the current platform.
+
+### No hotplug
+
+No backend implements hotplug notifications. Poll `DeviceList` if you need to
+detect changes.
+
 ## Limitations
 
-- Linux and macOS only (Windows support not yet implemented)
 - Requires appropriate permissions for USB device access
 - No hotplug support (can be implemented with platform-specific monitoring)
 - Async transfers on macOS require CFRunLoop integration
+- The Windows backend is newer than the Linux and macOS ones; isochronous and
+  asynchronous transfers are not implemented there yet
 
 ## Resources
 
