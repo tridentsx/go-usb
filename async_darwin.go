@@ -96,6 +96,11 @@ func (t *AsyncTransfer) Submit() error {
 		t.mutex.Lock()
 		defer t.mutex.Unlock()
 
+		// t.Transfer.mu (distinct from t.mutex above) guards status,
+		// actualLength and callback, because Transfer.Status, ActualLength
+		// and Buffer are read directly by the submitting goroutine without
+		// going through AsyncTransfer at all.
+		t.Transfer.mu.Lock()
 		t.actualLength = int(bytesTransferred)
 		if result == kIOReturnSuccess {
 			t.status = TransferCompleted
@@ -104,10 +109,13 @@ func (t *AsyncTransfer) Submit() error {
 		} else {
 			t.status = TransferError
 		}
+		userCallback := t.callback
+		t.Transfer.mu.Unlock()
+
 		t.markCompletedLocked()
 
-		if t.callback != nil {
-			t.callback(t.Transfer)
+		if userCallback != nil {
+			userCallback(t.Transfer)
 		}
 	}
 
@@ -147,7 +155,9 @@ func (t *AsyncTransfer) Cancel() error {
 	}
 
 	// Note: Proper cancellation would require IOKit async API support
+	t.Transfer.mu.Lock()
 	t.status = TransferCancelled
+	t.Transfer.mu.Unlock()
 	t.markCompletedLocked()
 
 	return nil
