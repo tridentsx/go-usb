@@ -26,12 +26,37 @@ func (u cfUUIDBytes) words() (uintptr, uintptr) {
 }
 
 // uuidBytes builds a cfUUIDBytes from the sixteen bytes as written in
-// IOUSBLib.h, which are in network order: byte 0 is the most significant.
+// IOUSBLib.h.
+//
+// CFUUIDBytes is a structure of sixteen UInt8 fields, byte0 at offset 0 through
+// byte15 at offset 15. Passing it by value therefore requires two words whose
+// *memory image* is that byte sequence in order, which on a little-endian
+// machine means decoding little-endian, not big-endian.
+//
+// Getting this backwards does not fail loudly: CFUUIDCreateFromUUIDBytes
+// accepts the reversed bytes and returns a perfectly valid object for a
+// different UUID, after which IOCreatePlugInInterfaceForService matches nothing
+// and reports kIOReturnUnsupported. TestUUIDRoundTripsThroughCoreFoundation
+// checks the resulting UUID against its canonical string to catch exactly that.
 func uuidBytes(b [16]byte) cfUUIDBytes {
 	return cfUUIDBytes{
-		Lo: binary.BigEndian.Uint64(b[0:8]),
-		Hi: binary.BigEndian.Uint64(b[8:16]),
+		Lo: binary.LittleEndian.Uint64(b[0:8]),
+		Hi: binary.LittleEndian.Uint64(b[8:16]),
 	}
+}
+
+// canonicalUUIDString renders the sixteen bytes in the standard textual form,
+// which is what CoreFoundation should report for the same UUID.
+func canonicalUUIDString(b [16]byte) string {
+	const hex = "0123456789ABCDEF"
+	out := make([]byte, 0, 36)
+	for i, v := range b {
+		if i == 4 || i == 6 || i == 8 || i == 10 {
+			out = append(out, '-')
+		}
+		out = append(out, hex[v>>4], hex[v&0x0f])
+	}
+	return string(out)
 }
 
 // IOKit plug-in and interface UUIDs, transcribed from IOKit/usb/IOUSBLib.h and

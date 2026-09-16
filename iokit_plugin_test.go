@@ -1,9 +1,20 @@
 package usb
 
 import (
+	"encoding/binary"
 	"testing"
 	"unsafe"
 )
+
+// allPluginUUIDs returns the UUIDs used for IOKit plug-in access, by name.
+func allPluginUUIDs() map[string][16]byte {
+	return map[string][16]byte{
+		"kIOUSBDeviceUserClientTypeID":    kIOUSBDeviceUserClientTypeID,
+		"kIOUSBInterfaceUserClientTypeID": kIOUSBInterfaceUserClientTypeID,
+		"kIOCFPlugInInterfaceID":          kIOCFPlugInInterfaceID,
+		"kIOUSBDeviceInterfaceID":         kIOUSBDeviceInterfaceID,
+	}
+}
 
 // TestIOCFPlugInInterfaceLayout pins the offsets used for vtable dispatch.
 //
@@ -44,26 +55,43 @@ func TestIOCFPlugInInterfaceLayout(t *testing.T) {
 	}
 }
 
-// TestUUIDBytes checks that the sixteen bytes as written in the headers survive
-// conversion into the two machine words an ABI passes CFUUIDBytes in.
+// TestUUIDBytesPreservesMemoryLayout checks the invariant that actually matters:
+// the two words must reproduce the original byte sequence in order when written
+// out, because that is the memory image CFUUIDBytes has when passed by value.
 //
-// The bytes are in network order, so byte 0 is the most significant of the first
-// word. Getting this backwards would query a nonexistent interface, and
-// QueryInterface would fail rather than crash — but silently, and every device
-// would look unopenable.
-func TestUUIDBytes(t *testing.T) {
+// The previous version of this test asserted a hand-computed big-endian
+// constant, which verified that the code did what was intended rather than that
+// the intention was right. It passed while the byte order was reversed, and the
+// symptom was IOCreatePlugInInterfaceForService reporting kIOReturnUnsupported
+// for every device.
+func TestUUIDBytesPreservesMemoryLayout(t *testing.T) {
+	for name, want := range allPluginUUIDs() {
+		u := uuidBytes(want)
+
+		var got [16]byte
+		binary.LittleEndian.PutUint64(got[0:8], u.Lo)
+		binary.LittleEndian.PutUint64(got[8:16], u.Hi)
+
+		if got != want {
+			t.Errorf("%s: round trip produced % x, want % x", name, got, want)
+		}
+	}
+}
+
+func TestUUIDWords(t *testing.T) {
 	u := uuidBytes(kIOCFPlugInInterfaceID)
-
-	if u.Lo != 0xC244E858109C11D4 {
-		t.Errorf("Lo = %#016x, want 0xC244E858109C11D4", u.Lo)
-	}
-	if u.Hi != 0x91D40050E4C6426F {
-		t.Errorf("Hi = %#016x, want 0x91D40050E4C6426F", u.Hi)
-	}
-
 	lo, hi := u.words()
 	if uintptr(u.Lo) != lo || uintptr(u.Hi) != hi {
 		t.Error("words() did not return the struct fields in order")
+	}
+}
+
+func TestCanonicalUUIDString(t *testing.T) {
+	if got, want := canonicalUUIDString(kIOCFPlugInInterfaceID), "C244E858-109C-11D4-91D4-0050E4C6426F"; got != want {
+		t.Errorf("kIOCFPlugInInterfaceID = %s, want %s", got, want)
+	}
+	if got, want := canonicalUUIDString(kIOUSBDeviceInterfaceID), "5C8187D0-9EF3-11D4-8B45-000A27052861"; got != want {
+		t.Errorf("kIOUSBDeviceInterfaceID = %s, want %s", got, want)
 	}
 }
 

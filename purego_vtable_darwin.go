@@ -24,6 +24,12 @@ import (
 type iokitPluginFuncs struct {
 	CFUUIDCreateFromUUIDBytes         func(alloc uintptr, bytes cfUUIDBytes) uintptr
 	IOCreatePlugInInterfaceForService func(service uint32, pluginType, interfaceType uintptr, theInterface *unsafe.Pointer, theScore *int32) int32
+
+	// CFUUIDCreateString is used only to verify, at test time, that a UUID
+	// built from raw bytes is the UUID intended. Passing the bytes in the wrong
+	// order yields a valid object for the wrong UUID, which is otherwise
+	// invisible until a plug-in lookup fails.
+	CFUUIDCreateString func(alloc uintptr, uuid uintptr) uintptr
 }
 
 var iokitPlugin iokitPluginFuncs
@@ -33,6 +39,7 @@ var iokitPlugin iokitPluginFuncs
 func registerPluginFuncs(ioKit, cf uintptr) {
 	purego.RegisterLibFunc(&iokitPlugin.CFUUIDCreateFromUUIDBytes, cf, "CFUUIDCreateFromUUIDBytes")
 	purego.RegisterLibFunc(&iokitPlugin.IOCreatePlugInInterfaceForService, ioKit, "IOCreatePlugInInterfaceForService")
+	purego.RegisterLibFunc(&iokitPlugin.CFUUIDCreateString, cf, "CFUUIDCreateString")
 }
 
 // hresultSuccess is S_OK, returned by QueryInterface on success.
