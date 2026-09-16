@@ -192,6 +192,9 @@ const (
 	propNumConfigurations = "bNumConfigurations"
 	propAddress           = "USB Address"
 	propLocationID        = "locationID"
+	propManufacturerIndex = "iManufacturer"
+	propProductIndex      = "iProduct"
+	propSerialIndex       = "iSerialNumber"
 	propVendorName        = "USB Vendor Name"
 	propProductName       = "USB Product Name"
 	propSerialNumber      = "USB Serial Number"
@@ -295,8 +298,22 @@ func (k *iokitFuncs) deviceFromService(service uint32) (*Device, bool) {
 		descriptor.NumConfigurations = uint8(v)
 	}
 
-	// IOKit exposes the strings themselves rather than their descriptor
-	// indices, so the index fields stay zero and the strings are cached.
+	// IOKit normally exposes the resolved strings rather than their descriptor
+	// indices; the indices live in the device descriptor, which needs a device
+	// interface to read. Some registry entries do publish them, so try, and
+	// leave the fields zero when they are absent rather than inventing values.
+	if v, ok := k.propertyNumber(props, propManufacturerIndex); ok {
+		descriptor.ManufacturerIndex = uint8(v)
+	}
+	if v, ok := k.propertyNumber(props, propProductIndex); ok {
+		descriptor.ProductIndex = uint8(v)
+	}
+	if v, ok := k.propertyNumber(props, propSerialIndex); ok {
+		descriptor.SerialNumberIndex = uint8(v)
+	}
+
+	// The strings themselves are cached regardless, since they are available
+	// without opening the device.
 	strings := &DeviceStrings{
 		Manufacturer: k.propertyString(props, propVendorName),
 		Product:      k.propertyString(props, propProductName),
