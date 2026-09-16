@@ -172,27 +172,16 @@ func displayVerbose(devices []*usb.Device) {
 
 		// Try to open device for more info
 		handle, err := dev.Open()
+
+		// Print the string descriptors. Reading them from the device needs an
+		// open handle, but enumeration may already have cached them, which is
+		// the only source for a device that cannot be opened at all: anything
+		// owned by a class driver on Windows, and every device under the
+		// CGO-free macOS backend.
+		printDeviceStrings(dev, handle)
+
 		if err == nil {
 			defer handle.Close()
-
-			// Get string descriptors
-			if desc.ManufacturerIndex > 0 {
-				if str, err := handle.StringDescriptor(desc.ManufacturerIndex); err == nil && str != "" {
-					fmt.Printf("  Manufacturer: %s\n", str)
-				}
-			}
-
-			if desc.ProductIndex > 0 {
-				if str, err := handle.StringDescriptor(desc.ProductIndex); err == nil && str != "" {
-					fmt.Printf("  Product: %s\n", str)
-				}
-			}
-
-			if desc.SerialNumberIndex > 0 {
-				if str, err := handle.StringDescriptor(desc.SerialNumberIndex); err == nil && str != "" {
-					fmt.Printf("  Serial Number: %s\n", str)
-				}
-			}
 
 			// Get configuration descriptor
 			for i := uint8(0); i < desc.NumConfigurations; i++ {
@@ -255,6 +244,54 @@ func displayVerbose(devices []*usb.Device) {
 			}
 		} else if os.Getuid() != 0 {
 			fmt.Printf("  (Run as root for more details)\n")
+		}
+	}
+}
+
+// printDeviceStrings prints the manufacturer, product and serial strings,
+// preferring a live read from the device and falling back to whatever
+// enumeration cached.
+//
+// handle may be nil, which is the normal case for a device this process cannot
+// open.
+func printDeviceStrings(dev *usb.Device, handle *usb.DeviceHandle) {
+	desc := dev.Descriptor
+
+	read := func(index uint8) string {
+		if handle == nil || index == 0 {
+			return ""
+		}
+		str, err := handle.StringDescriptor(index)
+		if err != nil {
+			return ""
+		}
+		return str
+	}
+
+	cached := func(pick func(s *usb.DeviceStrings) string) string {
+		if dev.SysfsStrings == nil {
+			return ""
+		}
+		return pick(dev.SysfsStrings)
+	}
+
+	fields := []struct {
+		label  string
+		index  uint8
+		cached string
+	}{
+		{"Manufacturer", desc.ManufacturerIndex, cached(func(s *usb.DeviceStrings) string { return s.Manufacturer })},
+		{"Product", desc.ProductIndex, cached(func(s *usb.DeviceStrings) string { return s.Product })},
+		{"Serial Number", desc.SerialNumberIndex, cached(func(s *usb.DeviceStrings) string { return s.Serial })},
+	}
+
+	for _, f := range fields {
+		value := read(f.index)
+		if value == "" {
+			value = f.cached
+		}
+		if value != "" {
+			fmt.Printf("  %s: %s\n", f.label, value)
 		}
 	}
 }
