@@ -106,6 +106,9 @@ func loadIOKit() (*iokitFuncs, error) {
 		purego.RegisterLibFunc(&iokit.CFGetTypeID, cf, "CFGetTypeID")
 		purego.RegisterLibFunc(&iokit.CFNumberGetTypeID, cf, "CFNumberGetTypeID")
 		purego.RegisterLibFunc(&iokit.CFStringGetTypeID, cf, "CFStringGetTypeID")
+
+		// Plug-in entry points, used for COM-style interface access.
+		registerPluginFuncs(ioKit, cf)
 	})
 
 	if iokitErr != nil {
