@@ -40,6 +40,16 @@ jobs:
     - name: Test
       run: go test -v ./...
 
+    # TEMPORARY DIAGNOSTIC - not for upstream.
+    # Prints what each macOS backend enumerates, so the cgo and purego lists can
+    # be compared on a machine that actually has USB devices.
+    - name: Enumerate USB devices (diagnostic)
+      if: runner.os == 'macOS'
+      run: |
+        echo "===== BEGIN ENUMERATION (CGO_ENABLED=$CGO_ENABLED) ====="
+        go run ./cmd/lsusb || echo "lsusb exited non-zero"
+        echo "===== END ENUMERATION ====="
+
   # The Windows backend is pure Go (golang.org/x/sys/windows lazy DLL loading),
   # so it cross-compiles without CGO and does not need a Windows runner to be
   # type-checked.
