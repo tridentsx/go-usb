@@ -36,6 +36,10 @@ type AsyncTransfer struct {
 	submitted bool
 	completed bool
 	mutex     sync.Mutex
+
+	// done is closed exactly once, when the transfer completes or is
+	// cancelled, so that waiters block rather than poll. See markCompleted.
+	done chan struct{}
 }
 
 // NewAsyncTransfer creates a new async transfer
@@ -49,6 +53,7 @@ func NewAsyncTransfer(handle *DeviceHandle, endpoint uint8, transferType Transfe
 			status:       TransferError,
 		},
 		handle: handle,
+		done:   make(chan struct{}),
 	}
 }
 
@@ -99,7 +104,7 @@ func (t *AsyncTransfer) Submit() error {
 		} else {
 			t.status = TransferError
 		}
-		t.completed = true
+		t.markCompletedLocked()
 
 		if t.callback != nil {
 			t.callback(t.Transfer)
@@ -143,7 +148,7 @@ func (t *AsyncTransfer) Cancel() error {
 
 	// Note: Proper cancellation would require IOKit async API support
 	t.status = TransferCancelled
-	t.completed = true
+	t.markCompletedLocked()
 
 	return nil
 }
