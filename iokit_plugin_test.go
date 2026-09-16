@@ -13,6 +13,7 @@ func allPluginUUIDs() map[string][16]byte {
 		"kIOUSBInterfaceUserClientTypeID": kIOUSBInterfaceUserClientTypeID,
 		"kIOCFPlugInInterfaceID":          kIOCFPlugInInterfaceID,
 		"kIOUSBDeviceInterfaceID":         kIOUSBDeviceInterfaceID,
+		"kIOUSBInterfaceInterfaceID300":   kIOUSBInterfaceInterfaceID300,
 	}
 }
 
@@ -93,17 +94,15 @@ func TestCanonicalUUIDString(t *testing.T) {
 	if got, want := canonicalUUIDString(kIOUSBDeviceInterfaceID), "5C8187D0-9EF3-11D4-8B45-000A27052861"; got != want {
 		t.Errorf("kIOUSBDeviceInterfaceID = %s, want %s", got, want)
 	}
+	if got, want := canonicalUUIDString(kIOUSBInterfaceInterfaceID300), "BCEAADDC-884D-4F27-8340-36D69FAB90F6"; got != want {
+		t.Errorf("kIOUSBInterfaceInterfaceID300 = %s, want %s", got, want)
+	}
 }
 
-// TestUUIDsAreDistinct guards against a copy-paste error between the four UUIDs,
+// TestUUIDsAreDistinct guards against a copy-paste error between the UUIDs,
 // which would silently query the wrong interface.
 func TestUUIDsAreDistinct(t *testing.T) {
-	uuids := map[string][16]byte{
-		"kIOUSBDeviceUserClientTypeID":    kIOUSBDeviceUserClientTypeID,
-		"kIOUSBInterfaceUserClientTypeID": kIOUSBInterfaceUserClientTypeID,
-		"kIOCFPlugInInterfaceID":          kIOCFPlugInInterfaceID,
-		"kIOUSBDeviceInterfaceID":         kIOUSBDeviceInterfaceID,
-	}
+	uuids := allPluginUUIDs()
 
 	seen := make(map[[16]byte]string, len(uuids))
 	for name, u := range uuids {
@@ -119,9 +118,12 @@ func TestUUIDsAreDistinct(t *testing.T) {
 	}
 }
 
-// TestUUIDVersionNibble is a sanity check on transcription. All four of these
-// are version 1 UUIDs, so the high nibble of byte 6 is 1. A mistyped byte
-// somewhere in the middle would very likely break this.
+// TestUUIDVersionNibble is a sanity check on transcription. All of the
+// original four are version 1 UUIDs, so the high nibble of byte 6 is 1; a
+// mistyped byte somewhere in the middle would very likely break this.
+// kIOUSBInterfaceInterfaceID300 is version 4 (byte 6 high nibble 4), which is
+// itself worth pinning: getting that nibble wrong is exactly the kind of
+// transcription slip this test exists to catch.
 func TestUUIDVersionNibble(t *testing.T) {
 	uuids := map[string][16]byte{
 		"kIOUSBDeviceUserClientTypeID":    kIOUSBDeviceUserClientTypeID,
@@ -134,5 +136,9 @@ func TestUUIDVersionNibble(t *testing.T) {
 		if version := u[6] >> 4; version != 1 {
 			t.Errorf("%s: UUID version nibble = %d, want 1", name, version)
 		}
+	}
+
+	if version := kIOUSBInterfaceInterfaceID300[6] >> 4; version != 4 {
+		t.Errorf("kIOUSBInterfaceInterfaceID300: UUID version nibble = %d, want 4", version)
 	}
 }

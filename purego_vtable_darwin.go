@@ -51,6 +51,12 @@ const (
 	kIOReturnExclusiveAccess = -0x1FFFFD3B // 0xe00002c5
 	kIOReturnNotPermitted    = -0x1FFFFD3F // 0xe00002c1
 	kIOReturnUnsupported     = -0x1FFFFD39 // 0xe00002c7
+
+	// kIOUSBTransactionTimeout is IOUSBFamily's kIOUSBTransactionTimeout: the
+	// same value the cgo backend's iokit_bindings_darwin.go declares as
+	// int32(-536870899) (0xe000000d). ReadPipeTO and WritePipeTO return this
+	// when the transfer times out.
+	kIOUSBTransactionTimeout = -536870899
 )
 
 // vtableOf returns the function-pointer table a COM-style interface handle
@@ -76,26 +82,27 @@ func vtableOf(handle unsafe.Pointer) *ioCFPlugInInterface {
 	return (*ioCFPlugInInterface)(table)
 }
 
-// deviceInterfaceForService obtains an IOUSBDeviceInterface for a registry
-// entry.
+// pluginInterfaceForService obtains a COM-style interface for a registry
+// entry: IOCreatePlugInInterfaceForService for pluginType, then QueryInterface
+// for target.
 //
-// This does not open the device. Opening is USBDeviceOpen, a method on the
-// returned interface, so an interface can be obtained for devices another
-// process holds.
+// This does not open anything. Opening is a method (USBDeviceOpen,
+// USBInterfaceOpen) on the returned interface, so an interface can be obtained
+// for a service another process holds.
 //
 // The caller owns the returned interface and must release it with
-// releaseDeviceInterface.
-func deviceInterfaceForService(service uint32) (unsafe.Pointer, error) {
+// releaseCOMInterface.
+func pluginInterfaceForService(service uint32, pluginType, target [16]byte) (unsafe.Pointer, error) {
 	k, err := loadIOKit()
 	if err != nil {
 		return nil, err
 	}
 
-	pluginType := iokitPlugin.CFUUIDCreateFromUUIDBytes(0, uuidBytes(kIOUSBDeviceUserClientTypeID))
-	if pluginType == 0 {
+	pluginTypeUUID := iokitPlugin.CFUUIDCreateFromUUIDBytes(0, uuidBytes(pluginType))
+	if pluginTypeUUID == 0 {
 		return nil, ErrOther
 	}
-	defer k.CFRelease(pluginType)
+	defer k.CFRelease(pluginTypeUUID)
 
 	interfaceType := iokitPlugin.CFUUIDCreateFromUUIDBytes(0, uuidBytes(kIOCFPlugInInterfaceID))
 	if interfaceType == 0 {
@@ -106,7 +113,7 @@ func deviceInterfaceForService(service uint32) (unsafe.Pointer, error) {
 	var plugin unsafe.Pointer
 	var score int32
 	if ret := iokitPlugin.IOCreatePlugInInterfaceForService(
-		service, pluginType, interfaceType, &plugin, &score); ret != kernSuccess || plugin == nil {
+		service, pluginTypeUUID, interfaceType, &plugin, &score); ret != kernSuccess || plugin == nil {
 		return nil, ErrNotSupported
 	}
 
@@ -118,33 +125,46 @@ func deviceInterfaceForService(service uint32) (unsafe.Pointer, error) {
 	// QueryInterface takes its REFIID by value. A 16-byte all-integer struct is
 	// passed in two consecutive registers on both arm64 and amd64, in the same
 	// order, so it becomes two arguments either way.
-	lo, hi := uuidBytes(kIOUSBDeviceInterfaceID).words()
+	lo, hi := uuidBytes(target).words()
 
-	var deviceInterface unsafe.Pointer
+	var iface unsafe.Pointer
 	result, _, _ := purego.SyscallN(vtable.QueryInterface,
-		uintptr(plugin), lo, hi, uintptr(unsafe.Pointer(&deviceInterface)))
+		uintptr(plugin), lo, hi, uintptr(unsafe.Pointer(&iface)))
 
-	// The plug-in is no longer needed once the device interface exists: the
-	// device interface holds its own reference.
+	// The plug-in is no longer needed once the target interface exists: that
+	// interface holds its own reference.
 	if vtable.Release != 0 {
 		purego.SyscallN(vtable.Release, uintptr(plugin))
 	}
 
-	if result != hresultSuccess || deviceInterface == nil {
+	if result != hresultSuccess || iface == nil {
 		return nil, ErrNotSupported
 	}
-	return deviceInterface, nil
+	return iface, nil
 }
 
-// releaseDeviceInterface drops a device interface obtained from
-// deviceInterfaceForService.
+// deviceInterfaceForService obtains an IOUSBDeviceInterface for a registry
+// entry. See pluginInterfaceForService.
+func deviceInterfaceForService(service uint32) (unsafe.Pointer, error) {
+	return pluginInterfaceForService(service, kIOUSBDeviceUserClientTypeID, kIOUSBDeviceInterfaceID)
+}
+
+// interfaceInterfaceForService obtains an IOUSBInterfaceInterface for a
+// registry entry describing one interface of a device. See
+// pluginInterfaceForService.
+func interfaceInterfaceForService(service uint32) (unsafe.Pointer, error) {
+	return pluginInterfaceForService(service, kIOUSBInterfaceUserClientTypeID, kIOUSBInterfaceInterfaceID300)
+}
+
+// releaseCOMInterface drops an interface obtained from
+// deviceInterfaceForService or interfaceInterfaceForService.
 //
 // Release sits at the same offset in every COM-style IOKit interface, since they
 // all begin with IUNKNOWN_C_GUTS, so the plug-in table describes it correctly.
-func releaseDeviceInterface(deviceInterface unsafe.Pointer) {
-	vtable := vtableOf(deviceInterface)
+func releaseCOMInterface(iface unsafe.Pointer) {
+	vtable := vtableOf(iface)
 	if vtable == nil || vtable.Release == 0 {
 		return
 	}
-	purego.SyscallN(vtable.Release, uintptr(deviceInterface))
+	purego.SyscallN(vtable.Release, uintptr(iface))
 }

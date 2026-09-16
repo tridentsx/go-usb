@@ -2,9 +2,12 @@
 
 // Transfer types and device-handle operations for the CGO-free macOS backend.
 //
-// Opening a device and control transfers are implemented via IOUSBDeviceInterface
-// vtable dispatch. Interface claiming and bulk/interrupt transfers, which need
-// IOUSBInterfaceInterface, are the next stage and still report ErrNotSupported.
+// Opening a device, control transfers, claiming an interface and synchronous
+// bulk/interrupt transfers are all implemented via vtable dispatch on
+// IOUSBDeviceInterface and IOUSBInterfaceInterface (see
+// purego_device_interface_darwin.go and purego_interface_darwin.go).
+// Asynchronous transfers need buffer lifetime tracking across a run-loop
+// callback and are not; see purego_interface_darwin.go's header comment.
 // Nothing here returns a nil error to pretend an operation happened.
 //
 // The types exist with the same fields and signatures as the cgo backend so that
@@ -22,18 +25,6 @@ import (
 	"time"
 )
 
-// --- IOKit COM-style interfaces ----------------------------------------------
-
-// BulkTransferIn reads from a bulk or interrupt pipe.
-func (i *IOUSBInterfaceInterface) BulkTransferIn(pipeRef uint8, data []byte, timeout uint32) (int, error) {
-	return 0, ErrNotSupported
-}
-
-// BulkTransferOut writes to a bulk or interrupt pipe.
-func (i *IOUSBInterfaceInterface) BulkTransferOut(pipeRef uint8, data []byte, timeout uint32) (int, error) {
-	return 0, ErrNotSupported
-}
-
 // --- DeviceHandle -------------------------------------------------------------
 
 // Close closes the device handle, releasing exclusive access and the interface.
@@ -46,13 +37,18 @@ func (h *DeviceHandle) Close() error {
 	}
 	h.closed = true
 
+	for _, intf := range h.interfaces {
+		intf.closeInterface()
+		intf.release()
+	}
+	h.interfaces = nil
+	h.claimedIfaces = nil
+
 	if h.devInterface != nil {
 		h.devInterface.closeDevice()
 		h.devInterface.release()
 		h.devInterface = nil
 	}
-	h.interfaces = nil
-	h.claimedIfaces = nil
 	return nil
 }
 
@@ -86,16 +82,96 @@ func (h *DeviceHandle) GetConfiguration() (int, error) {
 }
 
 // ClaimInterface claims an interface for I/O.
-func (h *DeviceHandle) ClaimInterface(iface uint8) error { return ErrNotSupported }
+//
+// The interface's io_service_t is found via the device interface's
+// CreateInterfaceIterator rather than by walking the IORegistry tree, matched
+// against alternate setting 0: a freshly opened device has not selected any
+// other alternate setting yet, and SetAltSetting moves it later.
+func (h *DeviceHandle) ClaimInterface(iface uint8) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed || h.devInterface == nil {
+		return ErrDeviceNotFound
+	}
+	if h.claimedIfaces[iface] {
+		return nil
+	}
+
+	service, err := findInterfaceService(h.devInterface, iface, 0)
+	if err != nil {
+		return err
+	}
+	defer releaseService(service)
+
+	intf, err := openInterfaceInterface(service)
+	if err != nil {
+		return err
+	}
+	if err := intf.open(); err != nil {
+		intf.release()
+		return err
+	}
+
+	h.interfaces[iface] = intf
+	h.claimedIfaces[iface] = true
+	return nil
+}
 
 // ReleaseInterface releases a claimed interface.
-func (h *DeviceHandle) ReleaseInterface(iface uint8) error { return ErrNotSupported }
+func (h *DeviceHandle) ReleaseInterface(iface uint8) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return ErrDeviceNotFound
+	}
+	if !h.claimedIfaces[iface] {
+		return nil
+	}
+
+	if intf, ok := h.interfaces[iface]; ok {
+		intf.closeInterface()
+		intf.release()
+		delete(h.interfaces, iface)
+	}
+	delete(h.claimedIfaces, iface)
+	return nil
+}
 
 // SetAltSetting selects an alternate setting on an interface.
-func (h *DeviceHandle) SetAltSetting(iface, altSetting uint8) error { return ErrNotSupported }
+func (h *DeviceHandle) SetAltSetting(iface, altSetting uint8) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return ErrDeviceNotFound
+	}
+	intf, ok := h.interfaces[iface]
+	if !ok {
+		return fmt.Errorf("interface %d not claimed", iface)
+	}
+	return intf.SetAlternateSetting(altSetting)
+}
 
 // ClearHalt clears a stall condition on an endpoint.
-func (h *DeviceHandle) ClearHalt(endpoint uint8) error { return ErrNotSupported }
+//
+// Like the cgo backend, the interface owning endpoint is not tracked, so this
+// tries every claimed interface until one accepts the clear.
+func (h *DeviceHandle) ClearHalt(endpoint uint8) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return ErrDeviceNotFound
+	}
+	for _, intf := range h.interfaces {
+		if err := intf.ClearPipeStall(endpoint & 0x0F); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("endpoint %02x not found", endpoint)
+}
 
 // ResetDevice resets the device.
 func (h *DeviceHandle) ResetDevice() error { return ErrNotSupported }

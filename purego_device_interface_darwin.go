@@ -222,6 +222,26 @@ func (d *IOUSBDeviceInterface) SetConfiguration(config uint8) error {
 	return nil
 }
 
+// CreateInterfaceIterator returns an iterator over the device's interfaces
+// matching req. Every field of req set to kIOUSBFindInterfaceDontCare returns
+// every interface, at every alternate setting, as a separate io_service_t; the
+// caller is responsible for releasing both the iterator and each service it
+// yields.
+func (d *IOUSBDeviceInterface) CreateInterfaceIterator(req *ioUSBFindInterfaceRequest) (uint32, error) {
+	v := d.vtable()
+	if v == nil || v.CreateInterfaceIterator == 0 {
+		return 0, ErrDeviceNotFound
+	}
+
+	var iterator uint32
+	ret, _, _ := purego.SyscallN(v.CreateInterfaceIterator,
+		uintptr(d.handle), uintptr(unsafe.Pointer(req)), uintptr(unsafe.Pointer(&iterator)))
+	if int32(ret) != kernSuccess {
+		return 0, ErrIO
+	}
+	return iterator, nil
+}
+
 // ControlTransfer performs a control transfer on the default control endpoint.
 //
 // The base IOUSBDeviceInterface offers DeviceRequest, which has no timeout

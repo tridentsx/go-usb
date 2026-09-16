@@ -201,6 +201,8 @@ const (
 	propVendorName        = "USB Vendor Name"
 	propProductName       = "USB Product Name"
 	propSerialNumber      = "USB Serial Number"
+	propInterfaceNumber   = "bInterfaceNumber"
+	propAlternateSetting  = "bAlternateSetting"
 )
 
 // IOKit class names for a USB device. IOUSBHostDevice is the modern class;
