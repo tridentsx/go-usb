@@ -22,11 +22,6 @@ import (
 
 // --- IOKit COM-style interfaces ----------------------------------------------
 
-// ControlTransfer performs a control transfer on the default control endpoint.
-func (d *IOUSBDeviceInterface) ControlTransfer(bmRequestType, bRequest uint8, wValue, wIndex uint16, data []byte, timeout uint32) (int, error) {
-	return 0, ErrNotSupported
-}
-
 // BulkTransferIn reads from a bulk or interrupt pipe.
 func (i *IOUSBInterfaceInterface) BulkTransferIn(pipeRef uint8, data []byte, timeout uint32) (int, error) {
 	return 0, ErrNotSupported
@@ -39,7 +34,7 @@ func (i *IOUSBInterfaceInterface) BulkTransferOut(pipeRef uint8, data []byte, ti
 
 // --- DeviceHandle -------------------------------------------------------------
 
-// Close closes the device handle.
+// Close closes the device handle, releasing exclusive access and the interface.
 func (h *DeviceHandle) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -48,16 +43,45 @@ func (h *DeviceHandle) Close() error {
 		return nil
 	}
 	h.closed = true
+
+	if h.devInterface != nil {
+		h.devInterface.closeDevice()
+		h.devInterface.release()
+		h.devInterface = nil
+	}
 	h.interfaces = nil
 	h.claimedIfaces = nil
 	return nil
 }
 
 // SetConfiguration selects a device configuration.
-func (h *DeviceHandle) SetConfiguration(config int) error { return ErrNotSupported }
+func (h *DeviceHandle) SetConfiguration(config int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed || h.devInterface == nil {
+		return ErrDeviceNotFound
+	}
+	if config < 0 || config > 0xff {
+		return ErrInvalidParameter
+	}
+	return h.devInterface.SetConfiguration(uint8(config))
+}
 
 // GetConfiguration returns the active configuration value.
-func (h *DeviceHandle) GetConfiguration() (int, error) { return 0, ErrNotSupported }
+func (h *DeviceHandle) GetConfiguration() (int, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed || h.devInterface == nil {
+		return 0, ErrDeviceNotFound
+	}
+	config, err := h.devInterface.Configuration()
+	if err != nil {
+		return 0, err
+	}
+	return int(config), nil
+}
 
 // ClaimInterface claims an interface for I/O.
 func (h *DeviceHandle) ClaimInterface(iface uint8) error { return ErrNotSupported }
@@ -96,12 +120,30 @@ func (h *DeviceHandle) DetachKernelDriver(iface uint8) error { return ErrNotSupp
 // macOS provides no user-space way to rebind a kernel driver.
 func (h *DeviceHandle) AttachKernelDriver(iface uint8) error { return ErrNotSupported }
 
-// StringDescriptor reads a string descriptor.
+// StringDescriptor reads a string descriptor from the device.
 //
-// Enumeration caches the manufacturer, product and serial strings from the IOKit
-// registry, so Device.SysfsStrings carries them without an open device.
+// Enumeration also caches the manufacturer, product and serial strings from the
+// IOKit registry, so Device.SysfsStrings carries those without an open device.
 func (h *DeviceHandle) StringDescriptor(index uint8) (string, error) {
-	return "", ErrNotSupported
+	if index == 0 {
+		return "", nil
+	}
+
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed || h.devInterface == nil {
+		return "", ErrDeviceNotFound
+	}
+
+	// A GET_DESCRIPTOR request for a string, in English (US).
+	buf := make([]byte, 255)
+	n, err := h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+		descriptorRequestValue(USB_DT_STRING, index), 0x0409, buf, 5000)
+	if err != nil {
+		return "", err
+	}
+	return decodeStringDescriptor(buf[:n]), nil
 }
 
 // GetDeviceDescriptor returns the device descriptor.
@@ -140,7 +182,19 @@ func (h *DeviceHandle) GetDeviceQualifierDescriptor() (*DeviceQualifierDescripto
 func (h *DeviceHandle) GetCapabilities() (uint32, error) { return 0, ErrNotSupported }
 
 // GetSpeed returns the device's negotiated speed.
-func (h *DeviceHandle) GetSpeed() (Speed, error) { return SpeedUnknown, ErrNotSupported }
+func (h *DeviceHandle) GetSpeed() (Speed, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed || h.devInterface == nil {
+		return SpeedUnknown, ErrDeviceNotFound
+	}
+	raw, err := h.devInterface.DeviceSpeed()
+	if err != nil {
+		return SpeedUnknown, err
+	}
+	return iokitSpeedToSpeed(raw), nil
+}
 
 // --- AsyncTransfer ------------------------------------------------------------
 

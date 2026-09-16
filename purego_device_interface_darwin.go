@@ -16,15 +16,8 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-// usbDeviceInterface wraps an IOUSBDeviceInterface handle.
-//
-// The zero value is unusable; obtain one with deviceInterfaceForService.
-type usbDeviceInterface struct {
-	handle unsafe.Pointer
-}
-
 // vtable returns the method table, or nil if the handle is unusable.
-func (d *usbDeviceInterface) vtable() *ioUSBDeviceInterface {
+func (d *IOUSBDeviceInterface) vtable() *ioUSBDeviceInterface {
 	if d == nil || d.handle == nil {
 		return nil
 	}
@@ -36,7 +29,7 @@ func (d *usbDeviceInterface) vtable() *ioUSBDeviceInterface {
 }
 
 // release drops the interface.
-func (d *usbDeviceInterface) release() {
+func (d *IOUSBDeviceInterface) release() {
 	v := d.vtable()
 	if v == nil || v.Release == 0 {
 		return
@@ -50,7 +43,7 @@ func (d *usbDeviceInterface) release() {
 //
 // out must point at storage large enough for what the method writes: the callee
 // is C and will not check.
-func (d *usbDeviceInterface) callOut(fn uintptr, out unsafe.Pointer) error {
+func (d *IOUSBDeviceInterface) callOut(fn uintptr, out unsafe.Pointer) error {
 	if fn == 0 {
 		return ErrNotSupported
 	}
@@ -61,7 +54,7 @@ func (d *usbDeviceInterface) callOut(fn uintptr, out unsafe.Pointer) error {
 	return nil
 }
 
-func (d *usbDeviceInterface) getU8(fn uintptr) (uint8, error) {
+func (d *IOUSBDeviceInterface) getU8(fn uintptr) (uint8, error) {
 	var value uint8
 	if err := d.callOut(fn, unsafe.Pointer(&value)); err != nil {
 		return 0, err
@@ -69,7 +62,7 @@ func (d *usbDeviceInterface) getU8(fn uintptr) (uint8, error) {
 	return value, nil
 }
 
-func (d *usbDeviceInterface) getU16(fn uintptr) (uint16, error) {
+func (d *IOUSBDeviceInterface) getU16(fn uintptr) (uint16, error) {
 	var value uint16
 	if err := d.callOut(fn, unsafe.Pointer(&value)); err != nil {
 		return 0, err
@@ -77,7 +70,7 @@ func (d *usbDeviceInterface) getU16(fn uintptr) (uint16, error) {
 	return value, nil
 }
 
-func (d *usbDeviceInterface) getU32(fn uintptr) (uint32, error) {
+func (d *IOUSBDeviceInterface) getU32(fn uintptr) (uint32, error) {
 	var value uint32
 	if err := d.callOut(fn, unsafe.Pointer(&value)); err != nil {
 		return 0, err
@@ -87,7 +80,7 @@ func (d *usbDeviceInterface) getU32(fn uintptr) (uint32, error) {
 
 // The getters. Each mirrors one entry in the method table.
 
-func (d *usbDeviceInterface) DeviceClass() (uint8, error) {
+func (d *IOUSBDeviceInterface) DeviceClass() (uint8, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -95,7 +88,7 @@ func (d *usbDeviceInterface) DeviceClass() (uint8, error) {
 	return d.getU8(v.GetDeviceClass)
 }
 
-func (d *usbDeviceInterface) DeviceSubClass() (uint8, error) {
+func (d *IOUSBDeviceInterface) DeviceSubClass() (uint8, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -103,7 +96,7 @@ func (d *usbDeviceInterface) DeviceSubClass() (uint8, error) {
 	return d.getU8(v.GetDeviceSubClass)
 }
 
-func (d *usbDeviceInterface) DeviceProtocol() (uint8, error) {
+func (d *IOUSBDeviceInterface) DeviceProtocol() (uint8, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -111,7 +104,7 @@ func (d *usbDeviceInterface) DeviceProtocol() (uint8, error) {
 	return d.getU8(v.GetDeviceProtocol)
 }
 
-func (d *usbDeviceInterface) VendorID() (uint16, error) {
+func (d *IOUSBDeviceInterface) VendorID() (uint16, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -119,7 +112,7 @@ func (d *usbDeviceInterface) VendorID() (uint16, error) {
 	return d.getU16(v.GetDeviceVendor)
 }
 
-func (d *usbDeviceInterface) ProductID() (uint16, error) {
+func (d *IOUSBDeviceInterface) ProductID() (uint16, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -127,7 +120,7 @@ func (d *usbDeviceInterface) ProductID() (uint16, error) {
 	return d.getU16(v.GetDeviceProduct)
 }
 
-func (d *usbDeviceInterface) ReleaseNumber() (uint16, error) {
+func (d *IOUSBDeviceInterface) ReleaseNumber() (uint16, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -136,7 +129,7 @@ func (d *usbDeviceInterface) ReleaseNumber() (uint16, error) {
 }
 
 // DeviceAddress returns the USB device address. USBDeviceAddress is a UInt16.
-func (d *usbDeviceInterface) DeviceAddress() (uint16, error) {
+func (d *IOUSBDeviceInterface) DeviceAddress() (uint16, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -144,7 +137,7 @@ func (d *usbDeviceInterface) DeviceAddress() (uint16, error) {
 	return d.getU16(v.GetDeviceAddress)
 }
 
-func (d *usbDeviceInterface) DeviceSpeed() (uint8, error) {
+func (d *IOUSBDeviceInterface) DeviceSpeed() (uint8, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -152,7 +145,7 @@ func (d *usbDeviceInterface) DeviceSpeed() (uint8, error) {
 	return d.getU8(v.GetDeviceSpeed)
 }
 
-func (d *usbDeviceInterface) NumberOfConfigurations() (uint8, error) {
+func (d *IOUSBDeviceInterface) NumberOfConfigurations() (uint8, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -160,7 +153,7 @@ func (d *usbDeviceInterface) NumberOfConfigurations() (uint8, error) {
 	return d.getU8(v.GetNumberOfConfigurations)
 }
 
-func (d *usbDeviceInterface) LocationID() (uint32, error) {
+func (d *IOUSBDeviceInterface) LocationID() (uint32, error) {
 	v := d.vtable()
 	if v == nil {
 		return 0, ErrDeviceNotFound
@@ -170,10 +163,90 @@ func (d *usbDeviceInterface) LocationID() (uint32, error) {
 
 // openDeviceInterface obtains a device interface for a registry entry, wrapped
 // for method dispatch.
-func openDeviceInterface(service uint32) (*usbDeviceInterface, error) {
+func openDeviceInterface(service uint32) (*IOUSBDeviceInterface, error) {
 	handle, err := deviceInterfaceForService(service)
 	if err != nil {
 		return nil, err
 	}
-	return &usbDeviceInterface{handle: handle}, nil
+	return &IOUSBDeviceInterface{handle: handle}, nil
+}
+
+// open claims the device for exclusive access via USBDeviceOpen.
+func (d *IOUSBDeviceInterface) open() error {
+	v := d.vtable()
+	if v == nil || v.USBDeviceOpen == 0 {
+		return ErrDeviceNotFound
+	}
+	ret, _, _ := purego.SyscallN(v.USBDeviceOpen, uintptr(d.handle))
+	switch int32(ret) {
+	case kernSuccess:
+		return nil
+	case kIOReturnExclusiveAccess:
+		return ErrDeviceBusy
+	case kIOReturnNotPermitted:
+		return ErrPermissionDenied
+	default:
+		return ErrIO
+	}
+}
+
+// closeDevice releases exclusive access. The interface itself stays valid.
+func (d *IOUSBDeviceInterface) closeDevice() error {
+	v := d.vtable()
+	if v == nil || v.USBDeviceClose == 0 {
+		return nil
+	}
+	purego.SyscallN(v.USBDeviceClose, uintptr(d.handle))
+	return nil
+}
+
+// Configuration reads the active configuration value.
+func (d *IOUSBDeviceInterface) Configuration() (uint8, error) {
+	v := d.vtable()
+	if v == nil {
+		return 0, ErrDeviceNotFound
+	}
+	return d.getU8(v.GetConfiguration)
+}
+
+// SetConfiguration selects a configuration by value.
+func (d *IOUSBDeviceInterface) SetConfiguration(config uint8) error {
+	v := d.vtable()
+	if v == nil || v.SetConfiguration == 0 {
+		return ErrDeviceNotFound
+	}
+	ret, _, _ := purego.SyscallN(v.SetConfiguration, uintptr(d.handle), uintptr(config))
+	if int32(ret) != kernSuccess {
+		return ErrIO
+	}
+	return nil
+}
+
+// ControlTransfer performs a control transfer on the default control endpoint.
+//
+// The base IOUSBDeviceInterface offers DeviceRequest, which has no timeout
+// parameter; the timeout is therefore accepted and ignored. Honouring it needs
+// DeviceRequestTO from a later interface version, which is not yet transcribed.
+func (d *IOUSBDeviceInterface) ControlTransfer(bmRequestType, bRequest uint8, wValue, wIndex uint16, data []byte, timeout uint32) (int, error) {
+	v := d.vtable()
+	if v == nil || v.DeviceRequest == 0 {
+		return 0, ErrDeviceNotFound
+	}
+
+	req := ioUSBDevRequest{
+		bmRequestType: bmRequestType,
+		bRequest:      bRequest,
+		wValue:        wValue,
+		wIndex:        wIndex,
+		wLength:       uint16(len(data)),
+	}
+	if len(data) > 0 {
+		req.pData = uintptr(unsafe.Pointer(&data[0]))
+	}
+
+	ret, _, _ := purego.SyscallN(v.DeviceRequest, uintptr(d.handle), uintptr(unsafe.Pointer(&req)))
+	if int32(ret) != kernSuccess {
+		return 0, ErrIO
+	}
+	return int(req.wLenDone), nil
 }

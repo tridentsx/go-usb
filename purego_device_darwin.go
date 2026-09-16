@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unsafe"
 )
 
 // IOKitDevice identifies a USB device in the IOKit registry.
@@ -62,17 +63,19 @@ type CachedStrings = DeviceStrings
 // IOUSBDeviceInterface wraps IOKit's IOUSBDeviceInterface, a COM-style
 // structure of function pointers.
 //
-// Obtaining one requires IOCreatePlugInInterfaceForService and QueryInterface,
-// which is not implemented yet, so this is never non-nil in this build.
+// handle is what IOCreatePlugInInterfaceForService plus QueryInterface yields: a
+// pointer to a pointer to the method table. Methods are dispatched through it in
+// purego_device_interface_darwin.go.
 type IOUSBDeviceInterface struct {
-	// ptr is the interface pointer IOKit returns, a pointer to a pointer to a
-	// table of function pointers.
-	ptr uintptr
+	handle unsafe.Pointer
 }
 
 // IOUSBInterfaceInterface wraps IOKit's IOUSBInterfaceInterface.
+//
+// Its own method table is not transcribed yet, so transfers on an interface
+// still report ErrNotSupported.
 type IOUSBInterfaceInterface struct {
-	ptr uintptr
+	handle unsafe.Pointer
 }
 
 // DeviceHandle represents an open USB device on macOS.
@@ -138,11 +141,36 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 
 // Open opens the USB device.
 //
-// Not implemented in the CGO-free backend yet: it requires calling methods on
-// IOKit's COM-style device interface. Build with cgo enabled for a backend that
-// can open devices.
+// The IOKit service is looked up again by locationID, because enumeration
+// releases the registry entries it walked. A device interface is then obtained
+// and opened for exclusive access.
 func (d *Device) Open() (*DeviceHandle, error) {
-	return nil, ErrNotSupported
+	if d == nil || d.IOKitDevice == nil {
+		return nil, ErrInvalidParameter
+	}
+
+	service, err := serviceForLocationID(d.IOKitDevice.LocationID)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseService(service)
+
+	iface, err := openDeviceInterface(service)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := iface.open(); err != nil {
+		iface.release()
+		return nil, err
+	}
+
+	return &DeviceHandle{
+		device:        d,
+		devInterface:  iface,
+		interfaces:    make(map[uint8]*IOUSBInterfaceInterface),
+		claimedIfaces: make(map[uint8]bool),
+	}, nil
 }
 
 // OpenDevice opens a USB device by vendor and product ID.

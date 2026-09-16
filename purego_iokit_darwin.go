@@ -340,3 +340,57 @@ func (k *iokitFuncs) deviceFromService(service uint32) (*Device, bool) {
 		CachedStrings: strings,
 	}, true
 }
+
+// serviceForLocationID finds the IOKit service for a device by its locationID.
+//
+// Enumeration releases the registry entries it walks, so opening a device means
+// looking it up again. locationID is the stable identity: it encodes the
+// controller and the port path, so it does not change while the device stays
+// plugged into the same port.
+func serviceForLocationID(locationID uint32) (uint32, error) {
+	k, err := loadIOKit()
+	if err != nil {
+		return 0, err
+	}
+
+	for _, class := range usbDeviceClasses {
+		matching := k.IOServiceMatching(class + "\x00")
+		if matching == 0 {
+			continue
+		}
+		var iterator uint32
+		if ret := k.IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator); ret != kernSuccess {
+			continue
+		}
+
+		for {
+			service := k.IOIteratorNext(iterator)
+			if service == 0 {
+				break
+			}
+
+			var props uintptr
+			if r := k.IORegistryEntryCreateCFProperties(service, &props, 0, 0); r == kernSuccess && props != 0 {
+				found, ok := k.propertyNumber(props, propLocationID)
+				k.CFRelease(props)
+				if ok && uint32(found) == locationID {
+					k.IOObjectRelease(iterator)
+					return service, nil
+				}
+			}
+			k.IOObjectRelease(service)
+		}
+		k.IOObjectRelease(iterator)
+	}
+
+	return 0, ErrDeviceNotFound
+}
+
+// releaseService drops a registry entry obtained from serviceForLocationID.
+func releaseService(service uint32) {
+	k, err := loadIOKit()
+	if err != nil || service == 0 {
+		return
+	}
+	k.IOObjectRelease(service)
+}

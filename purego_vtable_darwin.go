@@ -45,6 +45,14 @@ func registerPluginFuncs(ioKit, cf uintptr) {
 // hresultSuccess is S_OK, returned by QueryInterface on success.
 const hresultSuccess = 0
 
+// IOKit return codes, from IOKit/IOReturn.h. sub_iokit_common errors are
+// 0xe0000000 | (0x2bc + n).
+const (
+	kIOReturnExclusiveAccess = -0x1FFFFD3B // 0xe00002c5
+	kIOReturnNotPermitted    = -0x1FFFFD3F // 0xe00002c1
+	kIOReturnUnsupported     = -0x1FFFFD39 // 0xe00002c7
+)
+
 // vtableOf returns the function-pointer table a COM-style interface handle
 // points at.
 //
