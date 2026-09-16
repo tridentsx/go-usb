@@ -248,6 +248,7 @@ method cannot be added to one platform without the others.
 | `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` | `ErrNotSupported`, use `AsyncTransfer` | yes | `ErrNotSupported` |
 | Bulk streams (`AllocStreams`) | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `DetachKernelDriver` / `AttachKernelDriver` | yes (`USBDEVFS_DISCONNECT`) | `ErrNotSupported` | `ErrNotSupported` |
+| HID-class devices | raw, after detaching `usbhid` | not yet | report-level via `hid.dll` |
 | `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
 | Hotplug notifications | no | no | no |
@@ -274,17 +275,42 @@ them.
 
 ### Accessing HID devices
 
-This is the one place where the platforms differ in what they can reach rather
-than merely in how they get there.
+A lot of test equipment presents itself as a standard HID device so that it
+needs no driver installation: some report measurements directly in input
+reports, others tunnel a serial protocol over reports. Support differs by
+platform.
 
-On Linux you can call `DetachKernelDriver` to unbind `usbhid` and then talk to
-the device with raw transfers, which needs root or a udev rule. On macOS and
-Windows the kernel HID driver owns the device exclusively and there is no
-user-space way to unbind it, so HID devices enumerate but cannot be opened for
-raw I/O. Windows additionally refuses to open keyboards and mice with read or
-write access at all, as an anti-keylogger measure.
+On **Windows** such a device is opened through `hid.dll` automatically. `Open`
+tries WinUSB first and falls back to the HID transport, so no caller change is
+needed. What works:
 
-The library has no HID-specific backend on any platform.
+- `InterruptTransfer` on the endpoints the configuration descriptor advertises,
+  routed to the HID collection that serves them. Reports pass through unchanged,
+  including the leading report ID, which matches `hidraw` on Linux.
+- `GetFeatureReport`, `SetFeatureReport`, `GetInputReport`, `SetOutputReport`
+  for HID class requests, and `FlushHIDQueue` to discard stale queued reports.
+- `HIDReportLengths` reports the fixed report sizes, which a caller framing a
+  protocol over reports needs in order to size buffers.
+- `IsHID` tells you which transport a handle is using.
+
+What cannot work: vendor-specific control transfers, bulk transfers and
+isochronous transfers all return `ErrNotSupported`, because `hidclass.sys` owns
+the control endpoint and will not carry them. If a device needs vendor control
+requests, bind it to WinUSB instead.
+
+Pointing devices and keyboards are deliberately excluded. Windows refuses read
+and write access to them anyway, and a USB library is the wrong place to read
+keystrokes from. Collections on usage page `0x01` with usage Pointer, Mouse,
+Keyboard or Keypad, and all digitisers on page `0x0D`, are skipped. Consumer
+control (page `0x0C`) is allowed, since monitors and instruments use it as a
+control channel.
+
+On **Linux** you can call `DetachKernelDriver` to unbind `usbhid` and then use
+raw transfers, which needs root or a udev rule. That is more capable than the
+Windows HID path, since it carries vendor control requests too.
+
+On **macOS** HID devices enumerate but cannot currently be opened: `IOHIDFamily`
+owns them and the backend has no IOHIDManager transport yet.
 
 ### `Device.Path` is platform-specific
 

@@ -172,3 +172,26 @@ func busNumbering(rootInsts map[uint32]bool) map[uint32]uint8 {
 	}
 	return buses
 }
+
+// devnodeHasAncestor reports whether target appears among a devnode's ancestors,
+// or is the devnode itself.
+//
+// This is how a HID collection is attributed to a USB device: the collection's
+// devnode sits below the HID device, which sits below the USB function or
+// device, so walking up finds the device without relying on path text.
+func devnodeHasAncestor(devInst, target uint32) bool {
+	const maxDepth = 16
+
+	cur := devInst
+	for depth := 0; depth < maxDepth; depth++ {
+		if cur == target {
+			return true
+		}
+		parent, err := cmGetParent(cur)
+		if err != nil {
+			return false
+		}
+		cur = parent
+	}
+	return false
+}

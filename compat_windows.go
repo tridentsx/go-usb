@@ -86,6 +86,7 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 	type merged struct {
 		displayPath string
 		openPath    string
+		devInst     uint32
 		loc         deviceLocation
 	}
 
@@ -108,6 +109,9 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 		// path describes only part of a composite device.
 		if m.displayPath == "" || (isFunctionInterfacePath(m.displayPath) && !isFunctionInterfacePath(e.wd.DevicePath)) {
 			m.displayPath = e.wd.DevicePath
+			// The devnode of the device interface is the one HID collections
+			// hang below, so it must travel with the display path.
+			m.devInst = e.wd.DevInst
 		}
 		// Only a WinUSB interface can be opened for I/O.
 		if m.openPath == "" && e.wd.WinUSB {
@@ -123,6 +127,7 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 		m := byPort[key]
 
 		device := newDeviceFromPath(m.displayPath)
+		device.devInst = m.devInst
 		if m.openPath != "" {
 			// Open must target the WinUSB interface, which is not necessarily
 			// the path the device is identified by.
@@ -187,6 +192,7 @@ func describeFromHub(device *Device, hub windows.Handle, port int) {
 		if err != nil || len(raw) < 9 {
 			continue
 		}
+		device.rawConfigs = append(device.rawConfigs, raw)
 		device.Configs = append(device.Configs, RawConfigDescriptor{
 			Length:             raw[0],
 			DescriptorType:     raw[1],

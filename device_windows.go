@@ -101,6 +101,15 @@ type Device struct {
 	Configs      []RawConfigDescriptor
 	SysfsStrings *SysfsStrings
 	devicePath   string // Windows device path (e.g., \\?\usb#vid_xxxx&pid_xxxx...)
+
+	// devInst is the devnode for this device, used to find the HID collections
+	// that belong to it.
+	devInst uint32
+
+	// rawConfigs holds the configuration descriptors as read from the hub, kept
+	// so that endpoints can be mapped onto HID collections without opening the
+	// device.
+	rawConfigs [][]byte
 }
 
 // utf16ToRunes converts UTF-16 to runes
@@ -125,9 +134,19 @@ type DeviceHandle struct {
 	mu               sync.RWMutex
 	closed           bool
 	currentConfig    int
+
+	// hid is non-nil when the device is owned by the HID class driver and is
+	// reached through hid.dll rather than WinUSB. It is the second transport
+	// behind this handle.
+	hid *hidDevice
 }
 
-// Open opens the USB device
+// Open opens the USB device.
+//
+// WinUSB is tried first. If the device is owned by the HID class driver, which
+// is what WinUsb_Initialize failing indicates for a HID device, the handle
+// falls back to the HID transport: report-level access through hid.dll. See
+// hid_windows.go for what that can and cannot do.
 func (d *Device) Open() (*DeviceHandle, error) {
 	// Open the device file
 	pathPtr, err := windows.UTF16PtrFromString(d.devicePath)
@@ -138,13 +157,29 @@ func (d *Device) Open() (*DeviceHandle, error) {
 	fileHandle, err := windows.CreateFile(
 		pathPtr,
 		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OVERLAPPED,
 		0,
 	)
 	if err != nil {
+		// The device file itself cannot be opened, which is normal for a device
+		// owned by a class driver. HID devices are still reachable.
+		hid, hidErr := openHIDDevice(d)
+		if hidErr == nil {
+			return &DeviceHandle{
+				device:           d,
+				fileHandle:       windows.InvalidHandle,
+				interfaceHandles: make(map[uint8]winusbInterfaceHandle),
+				claimedIfaces:    make(map[uint8]bool),
+				currentConfig:    1,
+				hid:              hid,
+			}, nil
+		}
+		if hidErr == ErrNotSupported {
+			return nil, fmt.Errorf("device exposes only pointing or keyboard collections: %w", ErrNotSupported)
+		}
 		return nil, fmt.Errorf("failed to open device: %w", err)
 	}
 
@@ -157,6 +192,18 @@ func (d *Device) Open() (*DeviceHandle, error) {
 	)
 	if r0 == 0 {
 		windows.CloseHandle(fileHandle)
+
+		// WinUSB is not this device's function driver. Try HID before giving up.
+		if hid, hidErr := openHIDDevice(d); hidErr == nil {
+			return &DeviceHandle{
+				device:           d,
+				fileHandle:       windows.InvalidHandle,
+				interfaceHandles: make(map[uint8]winusbInterfaceHandle),
+				claimedIfaces:    make(map[uint8]bool),
+				currentConfig:    1,
+				hid:              hid,
+			}, nil
+		}
 		return nil, fmt.Errorf("WinUsb_Initialize failed: %w", e1)
 	}
 
@@ -180,6 +227,10 @@ func (h *DeviceHandle) Close() error {
 		return nil
 	}
 	h.closed = true
+
+	if h.hid != nil {
+		return h.hid.close()
+	}
 
 	// Release all interfaces
 	for iface := range h.interfaceHandles {

@@ -35,6 +35,10 @@ func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index 
 		return 0, ErrDeviceNotFound
 	}
 
+	if h.hid != nil {
+		return h.hidControlTransfer(requestType, request, value, index, data)
+	}
+
 	packet := encodeSetupPacket(requestType, request, value, index, uint16(len(data)))
 
 	// Create overlapped structure for async operation
@@ -125,6 +129,12 @@ func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, time
 
 	if len(data) == 0 && !allowZeroLength {
 		return 0, ErrInvalidParameter
+	}
+
+	if h.hid != nil {
+		// A HID device has no bulk endpoints. Interrupt endpoints are reached
+		// through InterruptTransfer, which routes to a report.
+		return h.hid.interruptTransfer(endpoint, data, timeout)
 	}
 
 	// Set timeout for the pipe
