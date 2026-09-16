@@ -2,9 +2,9 @@
 
 // Transfer types and device-handle operations for the CGO-free macOS backend.
 //
-// Stage 1 implements enumeration only. Everything that needs an open device
-// reports ErrNotSupported, because opening one requires calling methods on
-// IOKit's COM-style interfaces via vtable dispatch, which is the next stage.
+// Opening a device and control transfers are implemented via IOUSBDeviceInterface
+// vtable dispatch. Interface claiming and bulk/interrupt transfers, which need
+// IOUSBInterfaceInterface, are the next stage and still report ErrNotSupported.
 // Nothing here returns a nil error to pretend an operation happened.
 //
 // The types exist with the same fields and signatures as the cgo backend so that
@@ -16,6 +16,8 @@
 package usb
 
 import (
+	"encoding/binary"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -165,7 +167,39 @@ func (h *DeviceHandle) GetActiveConfigDescriptor() (*ConfigDescriptor, error) {
 
 // GetConfigDescriptor returns a configuration descriptor by index.
 func (h *DeviceHandle) GetConfigDescriptor(index uint8) (*ConfigDescriptor, error) {
-	return nil, ErrNotSupported
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed || h.devInterface == nil {
+		return nil, ErrDeviceNotFound
+	}
+
+	// Read the 9-byte header first to learn wTotalLength, then re-read the
+	// whole descriptor now that its size is known.
+	header := make([]byte, 9)
+	_, err := h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+		descriptorRequestValue(USB_DT_CONFIG, index), 0, header, 5000)
+	if err != nil {
+		return nil, err
+	}
+
+	totalLength := binary.LittleEndian.Uint16(header[2:4])
+	if totalLength < 9 {
+		return nil, fmt.Errorf("config descriptor too short: %d bytes", totalLength)
+	}
+
+	full := make([]byte, totalLength)
+	_, err = h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+		descriptorRequestValue(USB_DT_CONFIG, index), 0, full, 5000)
+	if err != nil {
+		return nil, err
+	}
+
+	config := &ConfigDescriptor{}
+	if err := config.Unmarshal(full); err != nil {
+		return nil, err
+	}
+	return config, nil
 }
 
 // GetBOSDescriptor reads the Binary Object Store descriptor.
