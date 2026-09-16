@@ -1,3 +1,8 @@
+//go:build darwin && cgo
+
+// This file reaches IOKit through cgo. The pure-Go backend selected when cgo is
+// disabled lives in the purego_*_darwin.go files; see issue #14.
+
 package usb
 
 /*

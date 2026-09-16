@@ -5,8 +5,8 @@ A cross-platform Go library for USB device communication, providing a libusb-lik
 ## Features
 
 - Cross-platform support (Linux, macOS and Windows)
-- Pure Go implementation on Linux (no libusb dependency)
-- Native IOKit integration on macOS
+- Pure Go implementation on Linux and Windows (no libusb dependency)
+- Native IOKit integration on macOS, with an experimental CGO-free backend
 - Device enumeration and management
 - Control, bulk, interrupt, and isochronous transfers
 - Synchronous and asynchronous transfer operations
@@ -272,6 +272,25 @@ For a composite device, `Device.Path` identifies the device while opening
 targets its WinUSB function interface. Only the first such function is used, so
 a device exposing several WinUSB functions is currently reachable through one of
 them.
+
+### Two macOS backends
+
+macOS has two implementations, selected by whether CGO is enabled:
+
+| Build | Backend | State |
+|---|---|---|
+| `CGO_ENABLED=1` (default) | IOKit through cgo | complete, and what you get unless you ask otherwise |
+| `CGO_ENABLED=0` | IOKit through [purego](https://github.com/ebitengine/purego) | enumeration only; see below |
+
+The CGO-free backend exists so the library needs no C toolchain anywhere, and so
+the macOS code can be cross-compiled and type-checked from other platforms —
+`GOOS=darwin CGO_ENABLED=0 go build ./...` works from Linux.
+
+It currently enumerates devices, with descriptors, bus, address and cached
+strings read from the IOKit registry. Opening a device requires calling methods
+on IOKit's COM-style interfaces, which is not implemented yet, so `Device.Open`
+and everything beyond it report `ErrNotSupported`. Build with CGO enabled if you
+need to talk to a device on macOS.
 
 ### Accessing HID devices
 

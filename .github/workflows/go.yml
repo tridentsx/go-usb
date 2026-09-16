@@ -7,15 +7,22 @@ on:
     branches: [ "main" ]
 
 jobs:
-  # Native jobs. macOS cannot be cross-compiled from Linux because the IOKit
-  # backend requires CGO, so it needs its own runner.
+  # Native jobs, run both with and without CGO.
+  #
+  # macOS has two backends: the IOKit one requires CGO, and the purego one is
+  # selected when CGO is disabled. Both must build and pass, so CGO_ENABLED is a
+  # matrix dimension rather than left at its default. Running Linux both ways
+  # also confirms its backend stays free of CGO.
   native:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.os }} cgo=${{ matrix.cgo }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ ubuntu-latest, macos-latest ]
+        cgo: [ '1', '0' ]
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
     steps:
     - uses: actions/checkout@v5
 
