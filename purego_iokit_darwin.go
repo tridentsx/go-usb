@@ -109,6 +109,9 @@ func loadIOKit() (*iokitFuncs, error) {
 
 		// Plug-in entry points, used for COM-style interface access.
 		registerPluginFuncs(ioKit, cf)
+
+		// Notification-port and run-loop entry points, used for hotplug.
+		registerHotplugFuncs(ioKit, cf)
 	})
 
 	if iokitErr != nil {
