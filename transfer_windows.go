@@ -242,10 +242,42 @@ func (h *DeviceHandle) ResetEndpoint(endpoint uint8) error {
 	return h.ClearHalt(endpoint)
 }
 
-// IsochronousTransfer performs an isochronous transfer (not fully supported on Windows WinUSB)
+// IsochronousTransfer performs a one-shot isochronous transfer.
+//
+// For OUT endpoints the caller fills data; for IN endpoints data is filled on
+// return. Returns ErrNotSupported on Windows < 8.1 or for non-WinUSB devices.
 func (h *DeviceHandle) IsochronousTransfer(endpoint uint8, data []byte, numPackets int, packetSize int, timeout time.Duration) ([]IsoPacketResult, error) {
-	// WinUSB has limited isochronous support
-	return nil, ErrNotSupported
+	t, err := h.NewIsochronousTransfer(endpoint, numPackets, packetSize)
+	if err != nil {
+		return nil, err
+	}
+	defer t.Close()
+
+	if endpoint&0x80 == 0 {
+		copy(t.buf, data)
+	}
+
+	if err := t.Submit(); err != nil {
+		return nil, err
+	}
+	if err := t.Wait(); err != nil {
+		return nil, err
+	}
+
+	if endpoint&0x80 != 0 {
+		copy(data, t.buf)
+	}
+
+	pkts := t.Packets()
+	results := make([]IsoPacketResult, len(pkts))
+	for i, p := range pkts {
+		results[i] = IsoPacketResult{
+			Length:       int(p.Length),
+			ActualLength: int(p.ActualLength),
+			Status:       int(p.Status),
+		}
+	}
+	return results, nil
 }
 
 // SubmitTransfer submits an async transfer (not implemented)

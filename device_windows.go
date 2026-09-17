@@ -626,6 +626,49 @@ func (h *DeviceHandle) getInterfaceHandle(iface uint8) winusbInterfaceHandle {
 	return h.interfaceHandles[iface]
 }
 
+// interfaceForEndpoint scans the stored raw configuration descriptors to find
+// which interface number owns the given endpoint address. Returns 0 if the
+// endpoint is on interface 0 or not found.
+func (h *DeviceHandle) interfaceForEndpoint(endpoint uint8) uint8 {
+	if h.device == nil {
+		return 0
+	}
+	for _, raw := range h.device.rawConfigs {
+		if iface, ok := endpointInterface(raw, endpoint); ok {
+			return iface
+		}
+	}
+	return 0
+}
+
+// endpointInterface scans a single raw configuration descriptor and returns
+// the interface number that declares endpoint addr.
+func endpointInterface(rawConfig []byte, addr uint8) (iface uint8, found bool) {
+	if len(rawConfig) < 9 {
+		return 0, false
+	}
+	pos := int(rawConfig[0]) // skip config descriptor (variable length)
+	curIface := uint8(0)
+	for pos+2 <= len(rawConfig) {
+		length := int(rawConfig[pos])
+		if length < 2 || pos+length > len(rawConfig) {
+			break
+		}
+		switch rawConfig[pos+1] {
+		case USB_DT_INTERFACE:
+			if length >= 9 {
+				curIface = rawConfig[pos+2]
+			}
+		case USB_DT_ENDPOINT:
+			if length >= 3 && rawConfig[pos+2] == addr {
+				return curIface, true
+			}
+		}
+		pos += length
+	}
+	return 0, false
+}
+
 // SetPipePolicy sets a policy for a pipe
 func (h *DeviceHandle) SetPipePolicy(endpoint uint8, policyType uint32, value uint32) error {
 	h.mu.RLock()
