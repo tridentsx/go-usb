@@ -361,7 +361,7 @@ func (i *IOUSBInterfaceInterface) BulkTransferOut(pipeRef uint8, data []byte, ti
 		return 0, ErrTimeout
 	}
 	if int32(ret) != kernSuccess {
-		return 0, ErrIO
+		return 0, fmt.Errorf("WritePipe(TO): IOReturn %#x: %w", uint32(ret), ErrIO)
 	}
 	return len(data), nil
 }
@@ -403,7 +403,7 @@ func (i *IOUSBInterfaceInterface) BulkTransferIn(pipeRef uint8, data []byte, tim
 		return 0, ErrTimeout
 	}
 	if int32(ret) != kernSuccess {
-		return 0, ErrIO
+		return 0, fmt.Errorf("ReadPipe(TO): IOReturn %#x: %w", uint32(ret), ErrIO)
 	}
 	return int(size), nil
 }
