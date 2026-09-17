@@ -534,6 +534,56 @@ func (i *IOUSBInterfaceInterface) ClearPipeStall(pipeRef uint8) error {
 	return nil
 }
 
+// NumEndpoints returns the number of endpoints on the interface's current
+// alternate setting, not counting the implicit control pipe.
+func (i *IOUSBInterfaceInterface) NumEndpoints() (uint8, error) {
+	var num C.UInt8
+	ret := C.GetNumEndpoints(i.ptr, &num)
+	if ret != kIOReturnSuccess {
+		return 0, fmt.Errorf("failed to get number of endpoints: 0x%x", ret)
+	}
+	return uint8(num), nil
+}
+
+// PipeRefForEndpoint finds the pipeRef for a USB endpoint address on the
+// interface's current alternate setting.
+//
+// pipeRef is not the endpoint address, or the endpoint number, or anything
+// derivable from the descriptor without asking IOKit: it is a 1-indexed
+// position in the interface's own pipe table, in descriptor order, which
+// GetPipeProperties is the only way to read. Deriving it as endpoint&0x0F,
+// which bulkTransfer in transfer_darwin.go and AsyncTransfer.Submit in
+// async_darwin.go both did, happens to be right exactly when an interface's
+// endpoint numbers are assigned in the same order they're indexed here, and
+// wrong otherwise -- silently: IOKit reports a real, plausible-looking
+// IOReturn for the wrong pipe rather than failing obviously. Found this way,
+// against real FX2 hardware, while verifying the purego backend's
+// isochronous support.
+func (i *IOUSBInterfaceInterface) PipeRefForEndpoint(endpoint uint8) (uint8, error) {
+	n, err := i.NumEndpoints()
+	if err != nil {
+		return 0, err
+	}
+	wantDirection := C.UInt8(0)
+	if endpoint&0x80 != 0 {
+		wantDirection = 1
+	}
+	wantNumber := C.UInt8(endpoint & 0x0F)
+
+	for pipeRef := C.UInt8(1); pipeRef <= C.UInt8(n); pipeRef++ {
+		var direction, number, transferType, interval C.UInt8
+		var maxPacketSize C.UInt16
+		ret := C.GetPipeProperties(i.ptr, pipeRef, &direction, &number, &transferType, &maxPacketSize, &interval)
+		if ret != kIOReturnSuccess {
+			continue
+		}
+		if direction == wantDirection && number == wantNumber {
+			return uint8(pipeRef), nil
+		}
+	}
+	return 0, fmt.Errorf("no pipe for endpoint %#x on this alternate setting", endpoint)
+}
+
 // BulkTransferOut performs a bulk OUT transfer
 func (i *IOUSBInterfaceInterface) BulkTransferOut(pipeRef uint8, data []byte, timeout uint32) (int, error) {
 	size := C.UInt32(len(data))

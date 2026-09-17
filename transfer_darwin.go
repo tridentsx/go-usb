@@ -64,14 +64,17 @@ func (h *DeviceHandle) bulkTransfer(endpoint uint8, data []byte, timeout time.Du
 		timeoutMs = 5000 // Default 5 second timeout
 	}
 
-	// Determine direction from endpoint address
-	if endpoint&0x80 != 0 {
-		// IN endpoint
-		return intf.BulkTransferIn(endpoint&0x0F, data, timeoutMs)
-	} else {
-		// OUT endpoint
-		return intf.BulkTransferOut(endpoint&0x0F, data, timeoutMs)
+	// pipeRef is a position in the interface's own pipe table, not derivable
+	// from the endpoint address without asking IOKit; see PipeRefForEndpoint.
+	pipeRef, err := intf.PipeRefForEndpoint(endpoint)
+	if err != nil {
+		return 0, err
 	}
+
+	if endpoint&0x80 != 0 {
+		return intf.BulkTransferIn(pipeRef, data, timeoutMs)
+	}
+	return intf.BulkTransferOut(pipeRef, data, timeoutMs)
 }
 
 // InterruptTransfer performs an interrupt transfer on an endpoint

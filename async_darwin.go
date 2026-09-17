@@ -111,8 +111,12 @@ func (t *AsyncTransfer) Submit() error {
 		}
 	}
 
-	var err error
-	pipeRef := t.endpoint & 0x0F
+	// pipeRef is a position in the interface's own pipe table, not derivable
+	// from the endpoint address without asking IOKit; see PipeRefForEndpoint.
+	pipeRef, err := intf.PipeRefForEndpoint(t.endpoint)
+	if err != nil {
+		return err
+	}
 
 	if t.endpoint&0x80 != 0 {
 		// IN transfer

@@ -166,7 +166,11 @@ func (h *DeviceHandle) ClearHalt(endpoint uint8) error {
 		return ErrDeviceNotFound
 	}
 	for _, intf := range h.interfaces {
-		if err := intf.ClearPipeStall(endpoint & 0x0F); err == nil {
+		pipeRef, err := intf.PipeRefForEndpoint(endpoint)
+		if err != nil {
+			continue
+		}
+		if err := intf.ClearPipeStall(pipeRef); err == nil {
 			return nil
 		}
 	}

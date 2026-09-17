@@ -23,6 +23,7 @@
 package usb
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -94,6 +95,81 @@ func (i *IOUSBInterfaceInterface) InterfaceNumber() (uint8, error) {
 	return num, nil
 }
 
+// NumEndpoints returns the number of endpoints on the interface's current
+// alternate setting, not counting the implicit control pipe.
+func (i *IOUSBInterfaceInterface) NumEndpoints() (uint8, error) {
+	v := i.vtable()
+	if v == nil || v.GetNumEndpoints == 0 {
+		return 0, ErrDeviceNotFound
+	}
+	var num uint8
+	ret, _, _ := purego.SyscallN(v.GetNumEndpoints, uintptr(i.handle), uintptr(unsafe.Pointer(&num)))
+	if int32(ret) != kernSuccess {
+		return 0, ErrIO
+	}
+	return num, nil
+}
+
+// pipeProperties describes one pipe as GetPipeProperties reports it.
+type pipeProperties struct {
+	direction     uint8 // 0 = OUT, 1 = IN (kUSBOut/kUSBIn from IOKit/usb/USBSpec.h)
+	number        uint8 // the endpoint number, without the direction bit
+	transferType  uint8
+	maxPacketSize uint16
+	interval      uint8
+}
+
+// GetPipeProperties describes the pipe at pipeRef.
+func (i *IOUSBInterfaceInterface) GetPipeProperties(pipeRef uint8) (pipeProperties, error) {
+	v := i.vtable()
+	if v == nil || v.GetPipeProperties == 0 {
+		return pipeProperties{}, ErrDeviceNotFound
+	}
+	var p pipeProperties
+	ret, _, _ := purego.SyscallN(v.GetPipeProperties, uintptr(i.handle), uintptr(pipeRef),
+		uintptr(unsafe.Pointer(&p.direction)), uintptr(unsafe.Pointer(&p.number)), uintptr(unsafe.Pointer(&p.transferType)),
+		uintptr(unsafe.Pointer(&p.maxPacketSize)), uintptr(unsafe.Pointer(&p.interval)))
+	if int32(ret) != kernSuccess {
+		return pipeProperties{}, fmt.Errorf("GetPipeProperties(%d): IOReturn %#x: %w", pipeRef, uint32(ret), ErrIO)
+	}
+	return p, nil
+}
+
+// PipeRefForEndpoint finds the pipeRef for a USB endpoint address on the
+// interface's current alternate setting.
+//
+// pipeRef is not the endpoint address, or the endpoint number, or anything
+// derivable from the descriptor without asking IOKit: it is a 1-indexed
+// position in the interface's own pipe table, in descriptor order, which
+// GetPipeProperties is the only way to read. Deriving it as endpoint&0x0F,
+// which both transfer_darwin.go's bulkTransfer and this package's earlier
+// isochronous code did, happens to be right exactly when an interface's
+// endpoint numbers are assigned in the same order they're indexed here, and
+// wrong otherwise -- silently: IOKit reports a real, plausible-looking
+// IOReturn for the wrong pipe rather than failing obviously.
+func (i *IOUSBInterfaceInterface) PipeRefForEndpoint(endpoint uint8) (uint8, error) {
+	n, err := i.NumEndpoints()
+	if err != nil {
+		return 0, err
+	}
+	wantDirection := uint8(0)
+	if endpoint&0x80 != 0 {
+		wantDirection = 1
+	}
+	wantNumber := endpoint & 0x0F
+
+	for pipeRef := uint8(1); pipeRef <= n; pipeRef++ {
+		p, err := i.GetPipeProperties(pipeRef)
+		if err != nil {
+			continue
+		}
+		if p.direction == wantDirection && p.number == wantNumber {
+			return pipeRef, nil
+		}
+	}
+	return 0, fmt.Errorf("no pipe for endpoint %#x on this alternate setting", endpoint)
+}
+
 // SetAlternateSetting selects an alternate setting on the interface.
 func (i *IOUSBInterfaceInterface) SetAlternateSetting(altSetting uint8) error {
 	v := i.vtable()
@@ -149,7 +225,7 @@ func (i *IOUSBInterfaceInterface) GetBusFrameNumber() (uint64, error) {
 	ret, _, _ := purego.SyscallN(v.GetBusFrameNumber, uintptr(i.handle),
 		uintptr(unsafe.Pointer(&frame)), uintptr(unsafe.Pointer(&atTime)))
 	if int32(ret) != kernSuccess {
-		return 0, ErrIO
+		return 0, fmt.Errorf("GetBusFrameNumber: IOReturn %#x: %w", uint32(ret), ErrIO)
 	}
 	return frame, nil
 }
@@ -165,7 +241,7 @@ func (i *IOUSBInterfaceInterface) CreateInterfaceAsyncEventSource() (uintptr, er
 	var source uintptr
 	ret, _, _ := purego.SyscallN(v.CreateInterfaceAsyncEventSource, uintptr(i.handle), uintptr(unsafe.Pointer(&source)))
 	if int32(ret) != kernSuccess || source == 0 {
-		return 0, ErrIO
+		return 0, fmt.Errorf("CreateInterfaceAsyncEventSource: IOReturn %#x: %w", uint32(ret), ErrIO)
 	}
 	return source, nil
 }
@@ -188,7 +264,7 @@ func (i *IOUSBInterfaceInterface) readIsochPipeAsync(pipeRef uint8, buf []byte, 
 	ret, _, _ := purego.SyscallN(v.ReadIsochPipeAsync, uintptr(i.handle), uintptr(pipeRef), uintptr(bufPtr),
 		uintptr(frameStart), uintptr(numFrames), uintptr(unsafe.Pointer(frameList)), callback, 0)
 	if int32(ret) != kernSuccess {
-		return ErrIO
+		return fmt.Errorf("ReadIsochPipeAsync: IOReturn %#x: %w", uint32(ret), ErrIO)
 	}
 	return nil
 }
@@ -205,7 +281,7 @@ func (i *IOUSBInterfaceInterface) writeIsochPipeAsync(pipeRef uint8, buf []byte,
 	ret, _, _ := purego.SyscallN(v.WriteIsochPipeAsync, uintptr(i.handle), uintptr(pipeRef), uintptr(bufPtr),
 		uintptr(frameStart), uintptr(numFrames), uintptr(unsafe.Pointer(frameList)), callback, 0)
 	if int32(ret) != kernSuccess {
-		return ErrIO
+		return fmt.Errorf("WriteIsochPipeAsync: IOReturn %#x: %w", uint32(ret), ErrIO)
 	}
 	return nil
 }

@@ -134,16 +134,19 @@ func (t *IsochronousTransfer) Submit() error {
 	}
 
 	if err := intf.ensureAsyncPump(); err != nil {
-		return err
+		return fmt.Errorf("starting async pump: %w", err)
 	}
 
 	frame, err := intf.GetBusFrameNumber()
 	if err != nil {
-		return err
+		return fmt.Errorf("GetBusFrameNumber: %w", err)
 	}
-	// A few frames in the future, the same margin the cgo backend used, so
-	// the request is queued before the bus schedule reaches it.
-	startFrame := frame + 10
+	// Far enough in the future that building the frame list and making the
+	// actual submit call doesn't let the bus schedule catch up first. The
+	// cgo backend used +10, untested against real hardware; against real
+	// hardware that was measured too tight and returned kIOReturnIsoTooOld
+	// ("isochronous I/O request for distant past").
+	startFrame := frame + 100
 
 	t.frameList = make([]ioUSBIsocFrame, t.numPackets)
 	for i := range t.frameList {
@@ -160,7 +163,14 @@ func (t *IsochronousTransfer) Submit() error {
 	intf.pending[key] = t
 	intf.pendingMu.Unlock()
 
-	pipeRef := t.endpoint & 0x0F
+	pipeRef, err := intf.PipeRefForEndpoint(t.endpoint)
+	if err != nil {
+		intf.pendingMu.Lock()
+		delete(intf.pending, key)
+		intf.pendingMu.Unlock()
+		return err
+	}
+
 	var submitErr error
 	if t.endpoint&0x80 != 0 {
 		submitErr = intf.readIsochPipeAsync(pipeRef, t.buffer, startFrame, uint32(t.numPackets), &t.frameList[0], intf.callback)
@@ -171,7 +181,7 @@ func (t *IsochronousTransfer) Submit() error {
 		intf.pendingMu.Lock()
 		delete(intf.pending, key)
 		intf.pendingMu.Unlock()
-		return submitErr
+		return fmt.Errorf("submitting isochronous pipe %#x: %w", t.endpoint, submitErr)
 	}
 
 	t.intf = intf
@@ -195,9 +205,13 @@ func (t *IsochronousTransfer) Cancel() error {
 		return nil
 	}
 	intf := t.intf
-	pipeRef := t.endpoint & 0x0F
+	endpoint := t.endpoint
 	t.mutex.Unlock()
 
+	pipeRef, err := intf.PipeRefForEndpoint(endpoint)
+	if err != nil {
+		return err
+	}
 	return intf.AbortPipe(pipeRef)
 }
 
