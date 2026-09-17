@@ -1,15 +1,8 @@
-//go:build darwin
-
-// Device and handle types for the CGO-free macOS backend, mirroring what
-// iokit_darwin.go and device_darwin.go provide for the cgo build.
+// Device and handle types for the macOS backend, reached through purego
+// rather than cgo (see #14).
 //
-// Field names and method signatures deliberately match the cgo backend, so that
-// transfer_darwin.go and compat_darwin.go — which are built in both
-// configurations — need no changes.
-//
-// Enumeration is implemented. Opening a device needs IOKit's COM-style
-// interfaces, which is the next stage, so anything requiring an open device
-// reports ErrNotSupported rather than a nil error. See issue #14.
+// Field names and method signatures are what transfer_darwin.go and
+// compat_darwin.go, shared across every macOS build, expect.
 
 package usb
 
@@ -65,7 +58,7 @@ type CachedStrings = DeviceStrings
 //
 // handle is what IOCreatePlugInInterfaceForService plus QueryInterface yields: a
 // pointer to a pointer to the method table. Methods are dispatched through it in
-// purego_device_interface_darwin.go.
+// device_interface_darwin.go.
 type IOUSBDeviceInterface struct {
 	handle unsafe.Pointer
 }
@@ -77,7 +70,7 @@ type IOUSBInterfaceInterface struct {
 	// The fields below back the async event pump isochronous transfers need.
 	// It is started lazily, once, on first use, and stopped when the
 	// interface is released; see ensureAsyncPump and stopAsyncPump in
-	// purego_isochronous_darwin.go.
+	// isochronous_darwin.go.
 	asyncMu      sync.Mutex
 	asyncStarted bool
 	asyncErr     error

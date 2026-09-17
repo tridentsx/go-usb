@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Hotplug notifications via IOKit, without cgo.
 //
 // IOServiceAddMatchingNotification arms a notification against a matching
@@ -105,7 +103,7 @@ func (h *darwinHotplugHandle) Deregister() error {
 	return nil
 }
 
-// registerHotplugCallback implements RegisterHotplugCallback for the CGO-free
+// registerHotplugCallback implements RegisterHotplugCallback for the
 // macOS backend.
 //
 // Every callback invocation, including the reports for devices that are

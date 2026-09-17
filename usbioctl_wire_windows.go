@@ -2,9 +2,7 @@ package usb
 
 import "encoding/binary"
 
-// This file holds the wire format of the Windows USB hub IOCTLs. It is
-// deliberately untagged so the layouts are compiled and unit-tested on every
-// host, not only on Windows.
+// This file holds the wire format of the Windows USB hub IOCTLs.
 //
 // Every structure here is ONE-BYTE PACKED. usbioctl.h wraps them in
 // pshpack1.h, so a Go struct with natural alignment silently reads the wrong

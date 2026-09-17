@@ -1,16 +1,15 @@
-//go:build darwin
-
-// IOKit COM-style vtable dispatch without cgo.
+// IOKit COM-style vtable dispatch, without cgo.
 //
 // IOKit exposes USB devices through plug-in interfaces modelled on COM: a
 // handle is a pointer to a pointer to a structure of function pointers, and a
 // method call reads the pointer out of that structure and calls it with the
-// handle as its first argument. The cgo backend does this with small C shim
-// functions; here purego.SyscallN calls the function pointer directly.
+// handle as its first argument. purego.SyscallN calls the function pointer
+// directly, in place of the small C shim functions a cgo binding would need.
 //
-// This file obtains an IOUSBDeviceInterface. Calling methods on it is the next
-// step and needs its own method table; that table is deliberately not guessed
-// here. See issue #14.
+// This file obtains an IOUSBDeviceInterface or IOUSBInterfaceInterface handle
+// via QueryInterface; dispatching methods on the handle is
+// device_interface_darwin.go and interface_darwin.go's job, through the
+// method tables in iokit_types_darwin.go.
 
 package usb
 
@@ -52,8 +51,7 @@ const (
 	kIOReturnNotPermitted    = -0x1FFFFD3F // 0xe00002c1
 	kIOReturnUnsupported     = -0x1FFFFD39 // 0xe00002c7
 
-	// kIOUSBTransactionTimeout is IOUSBFamily's kIOUSBTransactionTimeout: the
-	// same value the cgo backend's iokit_bindings_darwin.go declares as
+	// kIOUSBTransactionTimeout is IOUSBFamily's kIOUSBTransactionTimeout:
 	// int32(-536870899) (0xe000000d). ReadPipeTO and WritePipeTO return this
 	// when the transfer times out.
 	kIOUSBTransactionTimeout = -536870899

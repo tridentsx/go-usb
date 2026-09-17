@@ -176,8 +176,7 @@ func displayVerbose(devices []*usb.Device) {
 		// Print the string descriptors. Reading them from the device needs an
 		// open handle, but enumeration may already have cached them, which is
 		// the only source for a device that cannot be opened at all: anything
-		// owned by a class driver on Windows, and every device under the
-		// CGO-free macOS backend.
+		// owned by a class driver on Windows.
 		printDeviceStrings(dev, handle)
 
 		if err == nil {

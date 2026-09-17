@@ -1,11 +1,10 @@
-//go:build darwin
-
-// Asynchronous bulk and interrupt transfers via IOKit, without cgo.
+// Asynchronous bulk and interrupt transfers via IOKit, reached through
+// purego rather than cgo (see #14).
 //
 // Shares the per-interface async pump isochronous transfers use (see
-// ensureAsyncPump in purego_isochronous_darwin.go): one goroutine per
-// interface, locked to an OS thread, servicing a single CFRunLoop that
-// carries every asynchronous completion for that interface, whichever kind.
+// ensureAsyncPump in isochronous_darwin.go): one goroutine per interface,
+// locked to an OS thread, servicing a single CFRunLoop that carries every
+// asynchronous completion for that interface, whichever kind.
 //
 // ReadPipeAsync/WritePipeAsync's completion differs from
 // ReadIsochPipeAsync/WriteIsochPipeAsync's in exactly the field that matters
@@ -17,8 +16,6 @@
 // Submit until completion, for the same reason the isochronous pending map
 // does: it is what keeps the buffer reachable for as long as IOKit holds a
 // raw pointer to it, without runtime.Pinner or any cgo pointer-passing rule.
-//
-// See issue #14.
 
 package usb
 

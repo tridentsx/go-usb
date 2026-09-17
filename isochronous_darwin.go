@@ -1,5 +1,3 @@
-//go:build darwin
-
 // Isochronous transfers via IOKit, without cgo.
 //
 // Isochronous I/O is inherently asynchronous -- ReadIsochPipeAsync and
@@ -368,7 +366,7 @@ func (i *IOUSBInterfaceInterface) ensureAsyncPump() error {
 		return err
 	}
 
-	// See the note on kCFRunLoopDefaultMode in purego_hotplug_darwin.go: an
+	// See the note on kCFRunLoopDefaultMode in hotplug_darwin.go: an
 	// equal CFString built locally works exactly like the real constant would,
 	// since CFRunLoop matches modes by CFEqual, and avoids dereferencing a
 	// foreign global's address through Dlsym.
@@ -415,7 +413,7 @@ func (i *IOUSBInterfaceInterface) ensureAsyncPump() error {
 	go func() {
 		runtime.LockOSThread()
 		// Deliberately never unlocked; see the identical note in
-		// purego_hotplug_darwin.go's pump goroutine.
+		// hotplug_darwin.go's pump goroutine.
 
 		rl := hotplug.CFRunLoopGetCurrent()
 		hotplug.CFRunLoopAddSource(rl, source, mode)

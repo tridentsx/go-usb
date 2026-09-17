@@ -1,10 +1,8 @@
-//go:build darwin
-
 // Calls on an IOUSBInterfaceInterface, dispatched through its method table,
 // plus finding the io_service_t for a specific interface number.
 //
 // Claiming an interface needs its own COM interface, obtained the same way as
-// the device interface in purego_device_interface_darwin.go: a plug-in for the
+// the device interface in device_interface_darwin.go: a plug-in for the
 // interface's own io_service_t, queried for IOUSBInterfaceInterface300. The
 // interface's io_service_t itself comes from the device interface's
 // CreateInterfaceIterator, which enumerates the device's interfaces without
@@ -249,7 +247,7 @@ func (i *IOUSBInterfaceInterface) CreateInterfaceAsyncEventSource() (uintptr, er
 // readIsochPipeAsync and writeIsochPipeAsync submit an isochronous transfer.
 // callback is IOKit's IOAsyncCallback1: void(*)(void *refcon, IOReturn
 // result, void *arg0). IOKit sets arg0 to frameList on completion, which is
-// how the shared callback in purego_isochronous_darwin.go finds its way back
+// how the shared callback in isochronous_darwin.go finds its way back
 // to the right *IsochronousTransfer without allocating a trampoline per
 // transfer.
 func (i *IOUSBInterfaceInterface) readIsochPipeAsync(pipeRef uint8, buf []byte, frameStart uint64, numFrames uint32, frameList *ioUSBIsocFrame, callback uintptr) error {
@@ -290,7 +288,7 @@ func (i *IOUSBInterfaceInterface) writeIsochPipeAsync(pipeRef uint8, buf []byte,
 // transfer. Unlike the isochronous pair above, IOKit documents arg0 of the
 // completion as the number of bytes transferred, not a pointer, so refcon
 // (an address the caller controls) is what correlates a completion back to
-// its transfer in purego_asynctransfer_darwin.go's pendingBulk map.
+// its transfer in async_darwin.go's pendingBulk map.
 func (i *IOUSBInterfaceInterface) readPipeAsync(pipeRef uint8, buf []byte, callback, refcon uintptr) error {
 	v := i.vtable()
 	if v == nil || v.ReadPipeAsync == 0 {
@@ -327,9 +325,9 @@ func (i *IOUSBInterfaceInterface) writePipeAsync(pipeRef uint8, buf []byte, call
 
 // BulkTransferOut writes to a bulk or interrupt pipe.
 //
-// A zero timeout uses WritePipe, which blocks with no timeout at all, exactly
-// as the cgo backend's BulkTransfer C helper does; a nonzero timeout uses
-// WritePipeTO with that value as both the no-data and completion timeout.
+// A zero timeout uses WritePipe, which blocks with no timeout at all; a
+// nonzero timeout uses WritePipeTO with that value as both the no-data and
+// completion timeout.
 func (i *IOUSBInterfaceInterface) BulkTransferOut(pipeRef uint8, data []byte, timeout uint32) (int, error) {
 	v := i.vtable()
 	if v == nil {

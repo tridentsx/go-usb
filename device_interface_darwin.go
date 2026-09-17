@@ -1,12 +1,14 @@
-//go:build darwin
-
-// Calls on an IOUSBDeviceInterface, dispatched through its method table.
+// Calls on an IOUSBDeviceInterface, dispatched through its method table:
+// the getters, opening and closing the device, selecting a configuration,
+// enumerating its interfaces, and control transfers.
 //
-// Only the getters are implemented here. They are the safe place to start:
-// each takes a single out-pointer, none has a side effect, and every value they
-// return is already known from the IOKit registry, so the method table can be
-// checked against an external oracle rather than trusted. Opening the device and
-// transferring data come next. See issue #14.
+// The getters came first, and stayed the safest reference point for the
+// method table itself: each takes a single out-pointer, none has a side
+// effect, and every value they return is already known from the IOKit
+// registry, so the table can be checked against an external oracle rather
+// than trusted (see TestDeviceInterfaceAgreesWithRegistry). Everything added
+// afterward dispatches through the same table at the offsets that check
+// pins.
 
 package usb
 

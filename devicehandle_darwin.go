@@ -1,21 +1,17 @@
-//go:build darwin
-
-// Transfer types and device-handle operations for the CGO-free macOS backend.
+// DeviceHandle operations for the macOS backend.
 //
 // Opening a device, control transfers, claiming an interface and synchronous
 // bulk/interrupt transfers are all implemented via vtable dispatch on
 // IOUSBDeviceInterface and IOUSBInterfaceInterface (see
-// purego_device_interface_darwin.go and purego_interface_darwin.go).
+// device_interface_darwin.go and interface_darwin.go).
 // Asynchronous bulk/interrupt and isochronous transfers are implemented too,
-// in purego_asynctransfer_darwin.go and purego_isochronous_darwin.go, which
+// in async_darwin.go and isochronous_darwin.go, which
 // share one per-interface async pump. Nothing here returns a nil error to
 // pretend an operation happened.
 //
-// The types exist with the same fields and signatures as the cgo backend so that
-// transfer_darwin.go and compat_darwin.go compile unchanged in both
-// configurations, and so the contract assertions in api_contract.go hold.
-//
-// See issue #14.
+// Field names and method signatures are what transfer_darwin.go and
+// compat_darwin.go, shared across every macOS build, expect, and what the
+// contract assertions in api_contract.go check against.
 
 package usb
 
@@ -156,8 +152,8 @@ func (h *DeviceHandle) SetAltSetting(iface, altSetting uint8) error {
 
 // ClearHalt clears a stall condition on an endpoint.
 //
-// Like the cgo backend, the interface owning endpoint is not tracked, so this
-// tries every claimed interface until one accepts the clear.
+// The interface owning the endpoint is not tracked, so this tries every
+// claimed interface until one accepts the clear.
 func (h *DeviceHandle) ClearHalt(endpoint uint8) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -312,12 +308,11 @@ func (h *DeviceHandle) GetSpeed() (Speed, error) {
 
 // HandleEvents services pending asynchronous transfer completions.
 //
-// A no-op here: unlike the cgo backend's single shared run loop that the
-// caller must pump manually, every interface with an async transfer in
-// flight (bulk, interrupt or isochronous) runs its own background pump
-// goroutine, started automatically on first use -- see ensureAsyncPump in
-// purego_isochronous_darwin.go. There is nothing for the caller to drive.
-// Kept so portable code that calls it unconditionally keeps working.
+// A no-op here: every interface with an async transfer in flight (bulk,
+// interrupt or isochronous) runs its own background pump goroutine, started
+// automatically on first use -- see ensureAsyncPump in isochronous_darwin.go.
+// There is nothing for the caller to drive. Kept so portable code that calls
+// it unconditionally keeps working.
 func HandleEvents(timeout time.Duration) error { return nil }
 
 // RunEventLoop services asynchronous completions until stop is closed. See
@@ -325,5 +320,5 @@ func HandleEvents(timeout time.Duration) error { return nil }
 func RunEventLoop(stop <-chan struct{}) { <-stop }
 
 // AsyncTransfer and IsochronousTransfer, and their shared per-interface async
-// pump, live in purego_asynctransfer_darwin.go and
-// purego_isochronous_darwin.go.
+// pump, live in async_darwin.go and
+// isochronous_darwin.go.

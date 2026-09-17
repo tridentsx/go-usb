@@ -1,11 +1,7 @@
-//go:build darwin
-
-// This file reaches IOKit without cgo, using purego to load the frameworks and
-// call into them. It is the counterpart of iokit_darwin.go, which does the same
-// thing through cgo; see issue #14.
-//
-// Only enumeration is implemented so far. Opening a device requires calling
-// methods on IOKit's COM-style interfaces, which is the next stage.
+// This file loads IOKit and CoreFoundation via purego's dlopen/dlsym and
+// enumerates USB devices from the registry. Opening a device and dispatching
+// calls on it is device_interface_darwin.go and interface_darwin.go's job,
+// through the plug-in handles vtable_darwin.go obtains.
 
 package usb
 
