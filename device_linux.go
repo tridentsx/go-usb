@@ -36,14 +36,15 @@ const (
 )
 
 type Device struct {
-	Path         string
-	Bus          uint8
-	Address      uint8
-	Port         uint8
-	Speed        Speed
-	Descriptor   DeviceDescriptor
-	Configs      []RawConfigDescriptor
-	SysfsStrings *SysfsStrings
+	Path          string
+	Bus           uint8
+	Address       uint8
+	Port          uint8
+	Speed         Speed
+	ParentHubAddr uint8 // USB address of the parent hub (0 = unknown / root hub)
+	Descriptor    DeviceDescriptor
+	Configs       []RawConfigDescriptor
+	SysfsStrings  *SysfsStrings
 }
 
 // SysfsStrings is declared in types_common.go as an alias for DeviceStrings so

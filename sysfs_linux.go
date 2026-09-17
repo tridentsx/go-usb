@@ -25,6 +25,7 @@ type SysfsDevice struct {
 	Protocol     uint8
 	MaxPacket    uint8
 	NumConfigs   uint8
+	Speed        Speed
 	Manufacturer string
 	Product      string
 	Serial       string
@@ -155,7 +156,62 @@ func (e *SysfsEnumerator) loadDeviceFromSysfs(sysfsPath, name string) (*SysfsDev
 	device.Product = readString("product")
 	device.Serial = readString("serial")
 
+	// Read speed
+	if speedData, err := os.ReadFile(filepath.Join(sysfsPath, "speed")); err == nil {
+		switch strings.TrimSpace(string(speedData)) {
+		case "1.5":
+			device.Speed = SpeedLow
+		case "12":
+			device.Speed = SpeedFull
+		case "480":
+			device.Speed = SpeedHigh
+		case "5000":
+			device.Speed = SpeedSuper
+		case "10000", "20000":
+			device.Speed = SpeedSuperPlus
+		}
+	}
+
 	return device, nil
+}
+
+// sysfsPortFromName returns the port number a device occupies on its parent hub.
+// For root hubs ("usb1") it returns 0. For "1-2" it returns 2; for "1-2.3" it returns 3.
+func sysfsPortFromName(name string) uint8 {
+	if strings.HasPrefix(name, "usb") {
+		return 0
+	}
+	dashIdx := strings.Index(name, "-")
+	if dashIdx < 0 {
+		return 0
+	}
+	rest := name[dashIdx+1:]
+	portStr := rest
+	if dotIdx := strings.LastIndex(rest, "."); dotIdx >= 0 {
+		portStr = rest[dotIdx+1:]
+	}
+	n, _ := strconv.ParseUint(portStr, 10, 8)
+	return uint8(n)
+}
+
+// sysfsParentName returns the sysfs name of the parent hub.
+// Root hubs ("usb1") have no parent; direct children ("1-2") parent at "usb1";
+// deeper nodes ("1-2.3") parent at "1-2".
+func sysfsParentName(name string) string {
+	if strings.HasPrefix(name, "usb") {
+		return ""
+	}
+	dashIdx := strings.Index(name, "-")
+	if dashIdx < 0 {
+		return ""
+	}
+	busStr := name[:dashIdx]
+	rest := name[dashIdx+1:]
+	dotIdx := strings.LastIndex(rest, ".")
+	if dotIdx < 0 {
+		return "usb" + busStr
+	}
+	return busStr + "-" + rest[:dotIdx]
 }
 
 // ToUSBDevice converts a SysfsDevice to a USB Device
@@ -164,6 +220,8 @@ func (s *SysfsDevice) ToUSBDevice() *Device {
 		Path:    fmt.Sprintf("/dev/bus/usb/%03d/%03d", s.BusNum, s.DevNum),
 		Bus:     s.BusNum,
 		Address: s.DevNum,
+		Port:    sysfsPortFromName(s.Name),
+		Speed:   s.Speed,
 		SysfsStrings: &SysfsStrings{
 			Manufacturer: s.Manufacturer,
 			Product:      s.Product,

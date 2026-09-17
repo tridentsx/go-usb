@@ -255,13 +255,14 @@ func (e *IOKitEnumerator) EnumerateDevices() ([]*Device, error) {
 
 // Device represents a USB device on macOS
 type Device struct {
-	Path        string
-	Bus         uint8
-	Address     uint8
-	Port        uint8
-	Speed       Speed
-	Descriptor  DeviceDescriptor
-	IOKitDevice *IOKitDevice
+	Path          string
+	Bus           uint8
+	Address       uint8
+	Port          uint8
+	Speed         Speed
+	ParentHubAddr uint8 // USB address of the parent hub (0 = unknown / root hub)
+	Descriptor    DeviceDescriptor
+	IOKitDevice   *IOKitDevice
 
 	// Configs holds the raw configuration descriptor headers, populated on
 	// demand by GetConfigDescriptor. Present on every platform.

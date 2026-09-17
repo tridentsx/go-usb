@@ -317,17 +317,56 @@ func displayTree(devices []*usb.Device) {
 			}
 		}
 
-		if rootHub != nil {
-			speed := getSpeedString(rootHub)
-			maxPorts := getMaxPorts(rootHub)
+		if rootHub == nil {
+			continue
+		}
 
-			fmt.Printf("/:  Bus %03d.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/%dp, %s\n",
-				bus, maxPorts, speed)
+		speed := getSpeedString(rootHub)
+		maxPorts := getMaxPorts(rootHub)
 
+		fmt.Printf("/:  Bus %03d.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/%dp, %s\n",
+			bus, maxPorts, speed)
+
+		// Use recursive display when ParentHubAddr is populated on any device.
+		hasParentInfo := false
+		for _, dev := range otherDevices {
+			if dev.ParentHubAddr != 0 {
+				hasParentInfo = true
+				break
+			}
+		}
+
+		if hasParentInfo {
+			childrenOf := make(map[uint8][]*usb.Device)
+			for _, dev := range otherDevices {
+				p := dev.ParentHubAddr
+				if p == 0 {
+					p = rootHub.Address // unknown parent → attach to root
+				}
+				childrenOf[p] = append(childrenOf[p], dev)
+			}
+			printTreeChildren(childrenOf, rootHub.Address, "    ")
+		} else {
 			for _, dev := range otherDevices {
 				displayDeviceTree(dev, "    ")
 			}
 		}
+	}
+}
+
+// printTreeChildren recursively prints devices whose ParentHubAddr equals
+// parentAddr, then recurses into their children.
+func printTreeChildren(childrenOf map[uint8][]*usb.Device, parentAddr uint8, indent string) {
+	children := childrenOf[parentAddr]
+	sort.Slice(children, func(i, j int) bool {
+		if children[i].Port != children[j].Port {
+			return children[i].Port < children[j].Port
+		}
+		return children[i].Address < children[j].Address
+	})
+	for _, child := range children {
+		displayDeviceTree(child, indent)
+		printTreeChildren(childrenOf, child.Address, indent+"    ")
 	}
 }
 
@@ -409,6 +448,8 @@ func getSpeedString(dev *usb.Device) string {
 			return "480M"
 		case usb.SpeedSuper:
 			return "5000M"
+		case usb.SpeedSuperPlus:
+			return "10000M"
 		}
 	}
 

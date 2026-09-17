@@ -94,19 +94,24 @@ type winusbInterfaceHandle uintptr
 
 // Device represents a USB device on Windows
 type Device struct {
-	Path         string
-	Bus          uint8
-	Address      uint8
-	Port         uint8  // physical port number on the parent hub
-	Speed        Speed  // negotiated speed, set from hub IOCTL during enumeration
-	Descriptor   DeviceDescriptor
-	Configs      []RawConfigDescriptor
-	SysfsStrings *SysfsStrings
-	devicePath   string // Windows device path (e.g., \\?\usb#vid_xxxx&pid_xxxx...)
+	Path          string
+	Bus           uint8
+	Address       uint8
+	Port          uint8  // physical port number on the parent hub
+	Speed         Speed  // negotiated speed, set from hub IOCTL during enumeration
+	ParentHubAddr uint8  // USB address of the parent hub (0 = unknown / root hub)
+	Descriptor    DeviceDescriptor
+	Configs       []RawConfigDescriptor
+	SysfsStrings  *SysfsStrings
+	devicePath    string // Windows device path (e.g., \\?\usb#vid_xxxx&pid_xxxx...)
 
 	// devInst is the devnode for this device, used to find the HID collections
 	// that belong to it.
 	devInst uint32
+
+	// parentHubInst is the devnode of the hub this device is attached to.
+	// Used in a second pass to populate ParentHubAddr.
+	parentHubInst uint32
 
 	// rawConfigs holds the configuration descriptors as read from the hub, kept
 	// so that endpoints can be mapped onto HID collections without opening the

@@ -44,9 +44,23 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 	}
 
 	devices := make([]*Device, len(sysfsDevices))
+	nameToDevice := make(map[string]*Device, len(sysfsDevices))
 	for i, sd := range sysfsDevices {
 		devices[i] = sd.ToUSBDevice()
+		nameToDevice[sd.Name] = devices[i]
 	}
+
+	// Second pass: wire up ParentHubAddr using the sysfs name topology.
+	for i, sd := range sysfsDevices {
+		parentName := sysfsParentName(sd.Name)
+		if parentName == "" {
+			continue
+		}
+		if parent, ok := nameToDevice[parentName]; ok {
+			devices[i].ParentHubAddr = parent.Address
+		}
+	}
+
 	return devices, nil
 }
 

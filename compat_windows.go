@@ -144,6 +144,7 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 		}
 		device.Bus = buses[m.loc.RootInst]
 		device.Port = uint8(m.loc.Port)
+		device.parentHubInst = m.loc.HubInst
 
 		if hub, err := hubs.get(m.loc.HubPath); err == nil {
 			describeFromHub(device, hub, m.loc.Port)
@@ -166,6 +167,23 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 	for _, devInst := range rhDevnodes {
 		if dev := describeRootHub(devInst, buses[devInst]); dev != nil {
 			devices = append(devices, dev)
+		}
+	}
+
+	// Second pass: populate ParentHubAddr by mapping each device's parentHubInst
+	// to the Address of the hub Device whose devInst matches.
+	devInstToDevice := make(map[uint32]*Device, len(devices))
+	for _, dev := range devices {
+		if dev.devInst != 0 {
+			devInstToDevice[dev.devInst] = dev
+		}
+	}
+	for _, dev := range devices {
+		if dev.parentHubInst == 0 {
+			continue
+		}
+		if hub, ok := devInstToDevice[dev.parentHubInst]; ok {
+			dev.ParentHubAddr = hub.Address
 		}
 	}
 
