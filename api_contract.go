@@ -120,6 +120,35 @@ var (
 	_ TransferInterface     = (*Transfer)(nil)
 )
 
+// AsyncTransferInterface is the portable contract for an asynchronous
+// bulk, interrupt, or control transfer.
+type AsyncTransferInterface interface {
+	Submit() error
+	Wait() error
+	WaitWithTimeout(timeout time.Duration) error
+	Cancel() error
+	IsCompleted() bool
+	Status() TransferStatus
+	ActualLength() int
+	Buffer() []byte
+	SetTimeout(timeout time.Duration)
+	Fill(data []byte) error
+}
+
+// IsochronousTransferInterface is the portable contract for an isochronous
+// transfer.
+type IsochronousTransferInterface interface {
+	Submit() error
+	Wait() error
+	Cancel() error
+	Status() TransferStatus
+	ActualLength() int
+	Buffer() []byte
+	Packets() []IsoPacketDescriptor
+	IsoPacketBuffer(packetIndex int) ([]byte, error)
+	IsoPacketBufferSlices() [][]byte
+}
+
 // Deliberately excluded from the portable contract:
 //
 //   - Linux: Fd, Wrapped, WrapSysDevice. These expose a usbfs file descriptor,
@@ -130,7 +159,5 @@ var (
 //   - Windows: SetPipePolicy, SetTimeout. These configure WinUSB pipe policy,
 //     which is a WinUSB concept.
 //
-// AsyncTransfer and IsochronousTransfer have their own contract, asserted in
-// api_contract_unix.go for Linux and macOS. Windows is excluded there because
-// it has no AsyncTransfer type yet; implementing its asynchronous backend is
-// tracked separately.
+// AsyncTransfer and IsochronousTransfer are asserted against their interfaces
+// in api_contract_async.go, which covers all three platforms.
