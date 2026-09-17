@@ -76,6 +76,15 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 		}
 		entries = append(entries, e)
 	}
+
+	// Also seed the roots map with every root hub the host controllers report,
+	// so that buses with no WinUSB/generic-class devices still get a bus number
+	// and root hubs themselves appear in the list.
+	rhDevnodes := enumerateRootHubDevnodes()
+	for _, devInst := range rhDevnodes {
+		roots[devInst] = true
+	}
+
 	buses := busNumbering(roots)
 
 	// A composite device is reachable both through its own device interface and
@@ -146,6 +155,16 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 	for _, e := range entries {
 		if !e.ok {
 			devices = append(devices, newDeviceFromPath(e.wd.DevicePath))
+		}
+	}
+
+	// Append one entry per root hub. Root hubs are not returned by
+	// EnumerateUSBDevices (their paths contain "root_hub" and no VID/PID) so
+	// they must be described separately. Each gets Address=1 and DeviceClass=9
+	// so that lsusb -t can identify it as the root of its bus.
+	for _, devInst := range rhDevnodes {
+		if dev := describeRootHub(devInst, buses[devInst]); dev != nil {
+			devices = append(devices, dev)
 		}
 	}
 
@@ -507,6 +526,109 @@ func (h *DeviceHandle) GetSpeed() (Speed, error) {
 	default:
 		return SpeedUnknown, nil
 	}
+}
+
+// enumerateRootHubDevnodes returns the devnode of every root hub by walking
+// from each USB host controller to its first child.
+//
+// Each USB host controller has exactly one direct child devnode in the device
+// tree: the root hub. Calling CM_Get_Child on the host controller devnode
+// therefore gives the root hub's devnode without needing to parse paths.
+func enumerateRootHubDevnodes() []uint32 {
+	hcDevs, err := enumerateWithGUID(&GUID_DEVINTERFACE_USB_HOST_CONTROLLER)
+	if err != nil {
+		return nil
+	}
+
+	seen := make(map[uint32]bool)
+	var result []uint32
+	for _, hcDev := range hcDevs {
+		child, err := cmGetChild(hcDev.DevInst)
+		if err != nil {
+			continue
+		}
+		// Verify the child is actually a hub (has a USB hub interface).
+		if _, err := hubInterfacePath(child); err != nil {
+			continue
+		}
+		if !seen[child] {
+			seen[child] = true
+			result = append(result, child)
+		}
+	}
+	return result
+}
+
+// describeRootHub builds a Device for a root hub devnode. It always sets
+// Address=1 and DeviceClass=9 (Hub) so that lsusb -t can identify it as the
+// root of its bus tree.
+func describeRootHub(devInst uint32, bus uint8) *Device {
+	id, err := cmGetDeviceID(devInst)
+	if err != nil {
+		return nil
+	}
+
+	paths, err := windows.CM_Get_Device_Interface_List(id, &GUID_DEVINTERFACE_USB_HUB, 0)
+	if err != nil || len(paths) == 0 {
+		return nil
+	}
+	hubPath := paths[0]
+
+	var vid, pid uint16
+	var usbVersion uint16 = 0x0200 // default to USB 2.0
+
+	if hwID, err := cmGetHardwareID(devInst); err == nil {
+		vid, pid = parseVidPidFromHardwareID(hwID)
+		// Infer USB version from the hub type substring in the hardware ID.
+		// ROOT_HUB30 / ROOT_HUB31 → 3.x, ROOT_HUB20 → 2.0, ROOT_HUB → 1.1.
+		hwUpper := strings.ToUpper(hwID)
+		if strings.Contains(hwUpper, "ROOT_HUB3") {
+			usbVersion = 0x0300
+		} else if strings.Contains(hwUpper, "ROOT_HUB2") {
+			usbVersion = 0x0200
+		} else if strings.Contains(hwUpper, "ROOT_HUB") {
+			usbVersion = 0x0110
+		}
+	}
+
+	dev := &Device{
+		Path:       hubPath,
+		devicePath: hubPath,
+		Bus:        bus,
+		Address:    1,
+		devInst:    devInst,
+		Descriptor: DeviceDescriptor{
+			VendorID:    vid,
+			ProductID:   pid,
+			DeviceClass: 9, // Hub
+			USBVersion:  usbVersion,
+		},
+	}
+	return dev
+}
+
+// parseVidPidFromHardwareID parses VID and PID from a Windows hardware ID
+// string. Hardware IDs for USB root hubs use the format "&VIDxxxx&PIDyyyy"
+// (no underscore, four uppercase hex digits), unlike the device-path format
+// handled by parseVidPidFromPath.
+func parseVidPidFromHardwareID(hwID string) (vid, pid uint16) {
+	upper := strings.ToUpper(hwID)
+
+	vidIdx := strings.Index(upper, "&VID")
+	if vidIdx >= 0 && vidIdx+8 <= len(upper) {
+		if v, err := parseHex4(upper[vidIdx+4 : vidIdx+8]); err == nil {
+			vid = v
+		}
+	}
+
+	pidIdx := strings.Index(upper, "&PID")
+	if pidIdx >= 0 && pidIdx+8 <= len(upper) {
+		if p, err := parseHex4(upper[pidIdx+4 : pidIdx+8]); err == nil {
+			pid = p
+		}
+	}
+
+	return
 }
 
 // GetStatus gets device/interface/endpoint status

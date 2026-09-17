@@ -17,6 +17,7 @@ var (
 	modcfgmgr32 = windows.NewLazySystemDLL("cfgmgr32.dll")
 
 	procCM_Get_Parent                     = modcfgmgr32.NewProc("CM_Get_Parent")
+	procCM_Get_Child                      = modcfgmgr32.NewProc("CM_Get_Child")
 	procCM_Get_Device_IDW                 = modcfgmgr32.NewProc("CM_Get_Device_IDW")
 	procCM_Get_DevNode_Registry_PropertyW = modcfgmgr32.NewProc("CM_Get_DevNode_Registry_PropertyW")
 )
@@ -27,6 +28,10 @@ const crSuccess = 0
 // cmDRPAddress is CM_DRP_ADDRESS, the CM_ form of SPDRP_ADDRESS. For a USB
 // device this property holds its port number on the parent hub.
 const cmDRPAddress = 0x1D
+
+// cmDRPHardwareID is CM_DRP_HARDWAREID; its REG_MULTI_SZ value contains the
+// device's hardware ID strings, most-specific first.
+const cmDRPHardwareID = 0x02
 
 // maxDeviceIDLength is MAX_DEVICE_ID_LEN.
 const maxDeviceIDLength = 200
@@ -65,6 +70,32 @@ func cmGetPortNumber(devInst uint32) (int, error) {
 		return 0, ErrNotFound
 	}
 	return int(value), nil
+}
+
+// cmGetChild returns the first child devnode of devInst.
+func cmGetChild(devInst uint32) (uint32, error) {
+	var child uint32
+	r0, _, _ := syscall.SyscallN(procCM_Get_Child.Addr(),
+		uintptr(unsafe.Pointer(&child)), uintptr(devInst), 0)
+	if r0 != crSuccess {
+		return 0, ErrNotFound
+	}
+	return child, nil
+}
+
+// cmGetHardwareID returns the first (most specific) hardware ID string for a
+// devnode. Hardware IDs are stored as REG_MULTI_SZ; this returns the first
+// null-terminated entry, which is the most specific.
+func cmGetHardwareID(devInst uint32) (string, error) {
+	buf := make([]uint16, 256)
+	length := uint32(len(buf) * 2)
+	r0, _, _ := syscall.SyscallN(procCM_Get_DevNode_Registry_PropertyW.Addr(),
+		uintptr(devInst), uintptr(cmDRPHardwareID), 0,
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(unsafe.Pointer(&length)), 0)
+	if r0 != crSuccess {
+		return "", ErrNotFound
+	}
+	return windows.UTF16ToString(buf), nil
 }
 
 // hubInterfacePath returns the hub interface path for a devnode, or an error if

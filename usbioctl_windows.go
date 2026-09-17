@@ -1,6 +1,8 @@
 package usb
 
 import (
+	"encoding/binary"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -13,6 +15,13 @@ var (
 	ioctlUSBGetNodeInformation              = usbCtlCode(usbGetNodeInformation)
 	ioctlUSBGetDescriptorFromNodeConnection = usbCtlCode(usbGetDescriptorFromNodeConnection)
 	ioctlUSBGetNodeConnectionInformationEx  = usbCtlCode(usbGetNodeConnectionInformationEx)
+
+	// ioctlUSBGetRootHubName is HCD_GET_ROOT_HUB_NAME (258), which coincidentally
+	// has the same function-code value as USB_GET_NODE_INFORMATION. The kernel
+	// dispatches the IOCTL differently depending on whether the target is a host
+	// controller (xhci.sys/ehci.sys: returns USB_ROOT_HUB_NAME) or a hub
+	// (usbhub.sys: returns USB_NODE_INFORMATION).
+	ioctlUSBGetRootHubName = ioctlUSBGetNodeInformation
 )
 
 // maxPipesPerReply bounds the trailing USB_PIPE_INFO array we make room for.
@@ -80,6 +89,44 @@ func hubDescriptor(hub windows.Handle, port int, descType, descIndex uint8, lang
 		return nil, ErrIO
 	}
 	return desc, nil
+}
+
+// rootHubName returns the symbolic link name of the root hub attached to the
+// given host controller handle, without the leading "\\?\" prefix.
+//
+// The host controller is opened by the caller; this function does not close it.
+// The returned name can be made into an openable path by prepending `\\?\`.
+func rootHubName(hc windows.Handle) (string, error) {
+	// USB_ROOT_HUB_NAME: a 4-byte ActualLength followed by a variable-length
+	// UTF-16LE string. Call once with a small buffer to learn the required size,
+	// then again with a correctly-sized buffer.
+	var header [4]byte
+	var returned uint32
+	windows.DeviceIoControl(hc, ioctlUSBGetRootHubName,
+		nil, 0, &header[0], uint32(len(header)), &returned, nil)
+
+	needed := binary.LittleEndian.Uint32(header[:])
+	if needed <= 4 {
+		return "", ErrIO
+	}
+
+	buf := make([]byte, needed)
+	if err := windows.DeviceIoControl(hc, ioctlUSBGetRootHubName,
+		nil, 0, &buf[0], uint32(len(buf)), &returned, nil); err != nil {
+		return "", err
+	}
+	if returned < 4 {
+		return "", ErrIO
+	}
+
+	// Name starts at byte 4 as UTF-16LE, null-terminated.
+	nameBytes := buf[4:returned]
+	nWords := len(nameBytes) / 2
+	u16 := make([]uint16, nWords)
+	for i := range nWords {
+		u16[i] = binary.LittleEndian.Uint16(nameBytes[i*2:])
+	}
+	return windows.UTF16ToString(u16), nil
 }
 
 // hubStringDescriptor reads and decodes a string descriptor for a port.

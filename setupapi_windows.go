@@ -35,6 +35,15 @@ var (
 		Data3: 0x4A0E,
 		Data4: [8]byte{0x9C, 0x14, 0xB7, 0x11, 0x7D, 0x33, 0xA8, 0x17},
 	}
+
+	// GUID_DEVINTERFACE_USB_HOST_CONTROLLER is the device interface GUID for USB
+	// host controllers, which expose IOCTL_USB_GET_ROOT_HUB_NAME.
+	GUID_DEVINTERFACE_USB_HOST_CONTROLLER = windows.GUID{
+		Data1: 0x3ABF6F2D,
+		Data2: 0x71C4,
+		Data3: 0x462A,
+		Data4: [8]byte{0x8A, 0x92, 0x1E, 0x68, 0x61, 0xE6, 0xAF, 0x27},
+	}
 )
 
 const (
