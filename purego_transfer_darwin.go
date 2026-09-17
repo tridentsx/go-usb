@@ -6,9 +6,10 @@
 // bulk/interrupt transfers are all implemented via vtable dispatch on
 // IOUSBDeviceInterface and IOUSBInterfaceInterface (see
 // purego_device_interface_darwin.go and purego_interface_darwin.go).
-// Asynchronous transfers need buffer lifetime tracking across a run-loop
-// callback and are not; see purego_interface_darwin.go's header comment.
-// Nothing here returns a nil error to pretend an operation happened.
+// Asynchronous bulk/interrupt and isochronous transfers are implemented too,
+// in purego_asynctransfer_darwin.go and purego_isochronous_darwin.go, which
+// share one per-interface async pump. Nothing here returns a nil error to
+// pretend an operation happened.
 //
 // The types exist with the same fields and signatures as the cgo backend so that
 // transfer_darwin.go and compat_darwin.go compile unchanged in both
@@ -21,7 +22,6 @@ package usb
 import (
 	"encoding/binary"
 	"fmt"
-	"sync"
 	"time"
 )
 
@@ -310,72 +310,20 @@ func (h *DeviceHandle) GetSpeed() (Speed, error) {
 	return iokitSpeedToSpeed(raw), nil
 }
 
-// --- AsyncTransfer ------------------------------------------------------------
-
-// AsyncTransfer represents an asynchronous USB transfer on macOS.
-type AsyncTransfer struct {
-	*Transfer
-	handle    *DeviceHandle
-	submitted bool
-	completed bool
-	mutex     sync.Mutex
-
-	// done is closed exactly once, when the transfer completes or is
-	// cancelled, so that waiters block rather than poll. See markCompleted.
-	done chan struct{}
-}
-
-// NewAsyncTransfer creates a new async transfer.
-//
-// Deprecated: use DeviceHandle.NewBulkTransfer, NewInterruptTransfer or
-// NewControlTransfer, which report allocation errors.
-func NewAsyncTransfer(handle *DeviceHandle, endpoint uint8, transferType TransferType, bufferSize int) *AsyncTransfer {
-	return &AsyncTransfer{
-		Transfer: &Transfer{
-			handle:       handle,
-			endpoint:     endpoint,
-			transferType: transferType,
-			buffer:       make([]byte, bufferSize),
-			timeout:      5 * time.Second,
-			status:       TransferError,
-		},
-		handle: handle,
-		done:   make(chan struct{}),
-	}
-}
-
-// Submit queues the transfer.
-func (t *AsyncTransfer) Submit() error { return ErrNotSupported }
-
-// Cancel requests cancellation of a submitted transfer.
-func (t *AsyncTransfer) Cancel() error { return ErrNotSupported }
-
-// IsCompleted reports whether the transfer has completed. It never blocks.
-func (t *AsyncTransfer) IsCompleted() bool {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-	return t.completed
-}
-
-// AsyncBulkTransfer submits a bulk transfer and reports completion via callback.
-func (h *DeviceHandle) AsyncBulkTransfer(endpoint uint8, data []byte, callback func(*Transfer)) error {
-	return ErrNotSupported
-}
-
-// AsyncInterruptTransfer submits an interrupt transfer and reports completion
-// via callback.
-func (h *DeviceHandle) AsyncInterruptTransfer(endpoint uint8, data []byte, callback func(*Transfer)) error {
-	return ErrNotSupported
-}
-
 // HandleEvents services pending asynchronous transfer completions.
 //
-// IOKit delivers completions on a CFRunLoop. Until asynchronous transfers are
-// implemented there is nothing to pump, so this returns nil to keep portable
-// code that calls it unconditionally working.
+// A no-op here: unlike the cgo backend's single shared run loop that the
+// caller must pump manually, every interface with an async transfer in
+// flight (bulk, interrupt or isochronous) runs its own background pump
+// goroutine, started automatically on first use -- see ensureAsyncPump in
+// purego_isochronous_darwin.go. There is nothing for the caller to drive.
+// Kept so portable code that calls it unconditionally keeps working.
 func HandleEvents(timeout time.Duration) error { return nil }
 
-// RunEventLoop services asynchronous completions until stop is closed.
+// RunEventLoop services asynchronous completions until stop is closed. See
+// HandleEvents: there is nothing to pump here, so this just waits for stop.
 func RunEventLoop(stop <-chan struct{}) { <-stop }
 
-// IsochronousTransfer and its async pump live in purego_isochronous_darwin.go.
+// AsyncTransfer and IsochronousTransfer, and their shared per-interface async
+// pump, live in purego_asynctransfer_darwin.go and
+// purego_isochronous_darwin.go.

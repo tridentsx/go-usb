@@ -96,6 +96,15 @@ type IOUSBInterfaceInterface struct {
 	callback  uintptr
 	pendingMu sync.Mutex
 	pending   map[uintptr]*IsochronousTransfer
+
+	// bulkCallback is the same idea for ReadPipeAsync/WritePipeAsync (bulk and
+	// interrupt), which share this interface's async pump but need their own
+	// trampoline: their arg0 is documented as the byte count, not a pointer,
+	// so completions are correlated via refcon (an address of the transfer's
+	// own buffer) instead of arg0.
+	bulkCallback  uintptr
+	pendingBulkMu sync.Mutex
+	pendingBulk   map[uintptr]*AsyncTransfer
 }
 
 // DeviceHandle represents an open USB device on macOS.

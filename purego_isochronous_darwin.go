@@ -393,6 +393,21 @@ func (i *IOUSBInterfaceInterface) ensureAsyncPump() error {
 		}
 	})
 
+	// Bulk/interrupt async shares this same pump and run loop, but needs its
+	// own trampoline: see the field comments on bulkCallback/pendingBulk.
+	i.pendingBulk = make(map[uintptr]*AsyncTransfer)
+	i.bulkCallback = purego.NewCallback(func(refCon uintptr, result int32, arg0 uintptr) {
+		i.pendingBulkMu.Lock()
+		t, ok := i.pendingBulk[refCon]
+		if ok {
+			delete(i.pendingBulk, refCon)
+		}
+		i.pendingBulkMu.Unlock()
+		if ok {
+			t.completeAsync(result, uint32(arg0))
+		}
+	})
+
 	i.asyncReady = make(chan struct{})
 	i.asyncDone = make(chan struct{})
 	i.asyncMode = mode

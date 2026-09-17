@@ -286,6 +286,45 @@ func (i *IOUSBInterfaceInterface) writeIsochPipeAsync(pipeRef uint8, buf []byte,
 	return nil
 }
 
+// readPipeAsync and writePipeAsync submit an asynchronous bulk or interrupt
+// transfer. Unlike the isochronous pair above, IOKit documents arg0 of the
+// completion as the number of bytes transferred, not a pointer, so refcon
+// (an address the caller controls) is what correlates a completion back to
+// its transfer in purego_asynctransfer_darwin.go's pendingBulk map.
+func (i *IOUSBInterfaceInterface) readPipeAsync(pipeRef uint8, buf []byte, callback, refcon uintptr) error {
+	v := i.vtable()
+	if v == nil || v.ReadPipeAsync == 0 {
+		return ErrDeviceNotFound
+	}
+	var bufPtr unsafe.Pointer
+	if len(buf) > 0 {
+		bufPtr = unsafe.Pointer(&buf[0])
+	}
+	ret, _, _ := purego.SyscallN(v.ReadPipeAsync, uintptr(i.handle), uintptr(pipeRef), uintptr(bufPtr),
+		uintptr(len(buf)), callback, refcon)
+	if int32(ret) != kernSuccess {
+		return fmt.Errorf("ReadPipeAsync: IOReturn %#x: %w", uint32(ret), ErrIO)
+	}
+	return nil
+}
+
+func (i *IOUSBInterfaceInterface) writePipeAsync(pipeRef uint8, buf []byte, callback, refcon uintptr) error {
+	v := i.vtable()
+	if v == nil || v.WritePipeAsync == 0 {
+		return ErrDeviceNotFound
+	}
+	var bufPtr unsafe.Pointer
+	if len(buf) > 0 {
+		bufPtr = unsafe.Pointer(&buf[0])
+	}
+	ret, _, _ := purego.SyscallN(v.WritePipeAsync, uintptr(i.handle), uintptr(pipeRef), uintptr(bufPtr),
+		uintptr(len(buf)), callback, refcon)
+	if int32(ret) != kernSuccess {
+		return fmt.Errorf("WritePipeAsync: IOReturn %#x: %w", uint32(ret), ErrIO)
+	}
+	return nil
+}
+
 // BulkTransferOut writes to a bulk or interrupt pipe.
 //
 // A zero timeout uses WritePipe, which blocks with no timeout at all, exactly
