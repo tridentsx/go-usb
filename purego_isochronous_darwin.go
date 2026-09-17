@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build darwin
 
 // Isochronous transfers via IOKit, without cgo.
 //

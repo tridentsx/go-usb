@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build darwin
 
 // Calls on an IOUSBInterfaceInterface, dispatched through its method table,
 // plus finding the io_service_t for a specific interface number.

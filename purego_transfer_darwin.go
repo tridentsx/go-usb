@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build darwin
 
 // Transfer types and device-handle operations for the CGO-free macOS backend.
 //

@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build darwin
 
 // This file reaches IOKit without cgo, using purego to load the frameworks and
 // call into them. It is the counterpart of iokit_darwin.go, which does the same

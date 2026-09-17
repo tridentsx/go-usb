@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build darwin
 
 // Asynchronous bulk and interrupt transfers via IOKit, without cgo.
 //

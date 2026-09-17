@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build darwin
 
 // Calls on an IOUSBDeviceInterface, dispatched through its method table.
 //

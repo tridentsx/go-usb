@@ -5,8 +5,7 @@ A cross-platform Go library for USB device communication, providing a libusb-lik
 ## Features
 
 - Cross-platform support (Linux, macOS and Windows)
-- Pure Go implementation on Linux and Windows (no libusb dependency)
-- Native IOKit integration on macOS, with an experimental CGO-free backend
+- Pure Go implementation everywhere, including macOS (no libusb dependency, no C toolchain)
 - Device enumeration and management
 - Control, bulk, interrupt, and isochronous transfers
 - Synchronous and asynchronous transfer operations
@@ -273,24 +272,24 @@ targets its WinUSB function interface. Only the first such function is used, so
 a device exposing several WinUSB functions is currently reachable through one of
 them.
 
-### Two macOS backends
+### The macOS backend is cgo-free
 
-macOS has two implementations, selected by whether CGO is enabled:
+macOS reaches IOKit through [purego](https://github.com/ebitengine/purego)'s
+`dlopen`/`dlsym`/`SyscallN`/`NewCallback` rather than cgo. `CGO_ENABLED=1` and
+`CGO_ENABLED=0` build the identical set of files — there is no second,
+cgo-based backend to choose between anymore (see #14, and the history of
+PRs #15-#22 for how it got there).
 
-| Build | Backend | State |
-|---|---|---|
-| `CGO_ENABLED=1` (default) | IOKit through cgo | complete, and what you get unless you ask otherwise |
-| `CGO_ENABLED=0` | IOKit through [purego](https://github.com/ebitengine/purego) | enumeration only; see below |
+This is why `GOOS=darwin CGO_ENABLED=0 go build ./...` works from Linux: the
+macOS code can be cross-compiled and type-checked from any platform, with no
+C toolchain needed anywhere, ever.
 
-The CGO-free backend exists so the library needs no C toolchain anywhere, and so
-the macOS code can be cross-compiled and type-checked from other platforms —
-`GOOS=darwin CGO_ENABLED=0 go build ./...` works from Linux.
-
-It currently enumerates devices, with descriptors, bus, address and cached
-strings read from the IOKit registry. Opening a device requires calling methods
-on IOKit's COM-style interfaces, which is not implemented yet, so `Device.Open`
-and everything beyond it report `ErrNotSupported`. Build with CGO enabled if you
-need to talk to a device on macOS.
+Device enumeration, opening, claiming interfaces, control/bulk/interrupt/
+isochronous transfers (synchronous and asynchronous), hotplug and endpoint
+stall/clear-halt are all implemented and verified end to end against real
+hardware — see the [go-usb-jig](https://github.com/tridentsx/go-usb-jig)
+companion repo's hardware-gated test suite for the bulk/interrupt/
+isochronous/control/stall coverage specifically.
 
 ### Accessing HID devices
 

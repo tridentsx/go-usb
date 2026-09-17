@@ -1,4 +1,4 @@
-//go:build darwin && !cgo
+//go:build darwin
 
 // Device and handle types for the CGO-free macOS backend, mirroring what
 // iokit_darwin.go and device_darwin.go provide for the cgo build.
