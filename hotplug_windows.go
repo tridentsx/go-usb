@@ -17,10 +17,13 @@ package usb
 // returns 0 and the loop exits. Deregister blocks on h.done until the
 // goroutine has unregistered the notification and closed the window.
 //
-// RegisterDeviceNotification does not deliver notifications for devices that
-// are already connected at registration time; it only fires for future
-// arrivals and departures. Callers that need a snapshot of currently connected
-// devices should call DeviceList before registering.
+// Initial delivery: RegisterDeviceNotification fires only for future events.
+// After the notification is registered, the pump goroutine calls DeviceList
+// and fires HotplugEventArrived for every matching device that is already
+// connected, matching libusb's LIBUSB_HOTPLUG_ENUMERATE semantics. Those
+// devices are added to the seen map so that a WM_DEVICECHANGE arrival for the
+// same path (rare but possible in the narrow registration window) is
+// suppressed and does not fire a duplicate callback.
 
 import (
 	"fmt"
@@ -224,6 +227,11 @@ func (h *windowsHotplugHandle) onDeviceChange(event uint32, lParam uintptr) {
 
 	switch event {
 	case dbtDeviceArrival:
+		if _, alreadySeen := h.seen[key]; alreadySeen {
+			// Suppress the duplicate: this path was delivered during the
+			// initial-device snapshot taken just before the message loop started.
+			return
+		}
 		dev := newDeviceFromPath(path)
 		h.seen[key] = dev
 		if h.matches(dev) {
@@ -316,6 +324,19 @@ func registerHotplugCallback(vendorID, productID uint16, callback HotplugCallbac
 		activeHotplugHandles.Store(hwnd, h)
 
 		ready <- nil
+
+		// Deliver the current snapshot. Notification is already registered, so
+		// no device can arrive between now and the message loop without also
+		// queuing a WM_DEVICECHANGE. The seen map guards against duplicates.
+		if devices, err := DeviceList(); err == nil {
+			for _, dev := range devices {
+				key := strings.ToLower(dev.Path)
+				h.seen[key] = dev
+				if h.matches(dev) {
+					h.callback(HotplugEventArrived, dev)
+				}
+			}
+		}
 
 		// Message pump. GetMessage blocks until a message is available.
 		// It returns 0 when WM_QUIT is in the queue (posted by WM_DESTROY
