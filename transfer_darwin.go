@@ -2,6 +2,7 @@ package usb
 
 import (
 	"fmt"
+	"runtime"
 	"time"
 )
 
@@ -77,11 +78,70 @@ func (h *DeviceHandle) bulkTransfer(endpoint uint8, data []byte, timeout time.Du
 	return intf.BulkTransferOut(pipeRef, data, timeoutMs)
 }
 
-// InterruptTransfer performs an interrupt transfer on an endpoint
+// InterruptTransfer performs an interrupt transfer on an endpoint.
+//
+// Unlike BulkTransfer, this does not go through bulkTransfer's *TO (timeout)
+// variant: confirmed against a real FX2 interrupt endpoint, ReadPipeTO
+// returns kIOReturnBadArgument for interrupt-type pipes, while plain
+// ReadPipe on the exact same pipe succeeds. IOKit's non-timeout
+// ReadPipe/WritePipe block with no way to cancel them, so the caller's
+// timeout is enforced here in software instead: the underlying call keeps
+// running on its own goroutine even past the deadline, since AbortPipe (the
+// only real cancellation IOKit offers) would affect every transfer queued
+// on the pipe, not just this one.
 func (h *DeviceHandle) InterruptTransfer(endpoint uint8, data []byte, timeout time.Duration) (int, error) {
-	// On macOS, interrupt transfers use the same mechanism as bulk transfers
-	// The difference is in the endpoint type, which is handled by IOKit
-	return h.BulkTransfer(endpoint, data, timeout)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed {
+		return 0, ErrDeviceNotFound
+	}
+	if len(data) == 0 {
+		return 0, ErrInvalidParameter
+	}
+
+	var intf *IOUSBInterfaceInterface
+	for _, i := range h.interfaces {
+		intf = i
+		break
+	}
+	if intf == nil {
+		return 0, fmt.Errorf("no interface claimed for endpoint %02x", endpoint)
+	}
+
+	pipeRef, err := intf.PipeRefForEndpoint(endpoint)
+	if err != nil {
+		return 0, err
+	}
+
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		var n int
+		var err error
+		if endpoint&0x80 != 0 {
+			n, err = intf.BulkTransferIn(pipeRef, data, 0)
+		} else {
+			n, err = intf.BulkTransferOut(pipeRef, data, 0)
+		}
+		done <- result{n, err}
+	}()
+
+	if timeout <= 0 {
+		r := <-done
+		return r.n, r.err
+	}
+	select {
+	case r := <-done:
+		return r.n, r.err
+	case <-time.After(timeout):
+		return 0, ErrTimeout
+	}
 }
 
 // Transfer represents a USB transfer
