@@ -97,6 +97,7 @@ type Device struct {
 	Path         string
 	Bus          uint8
 	Address      uint8
+	Port         uint8  // physical port number on the parent hub
 	Speed        Speed  // negotiated speed, set from hub IOCTL during enumeration
 	Descriptor   DeviceDescriptor
 	Configs      []RawConfigDescriptor

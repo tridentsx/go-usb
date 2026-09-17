@@ -115,23 +115,44 @@ func filterDevices(devices []*usb.Device) []*usb.Device {
 }
 
 func displaySimple(devices []*usb.Device) {
+	// Detect address collisions: two different devices on the same bus with the
+	// same USB address. This can happen when the Windows host controller reports
+	// the same address for two distinct devices (a hardware/driver anomaly).
+	type busAddr struct{ bus, addr uint8 }
+	seen := make(map[busAddr]bool)
+	collisions := make(map[busAddr]bool)
+	for _, dev := range devices {
+		if dev.Address == 0 {
+			continue
+		}
+		key := busAddr{dev.Bus, dev.Address}
+		if seen[key] {
+			collisions[key] = true
+		}
+		seen[key] = true
+	}
+
 	for _, dev := range devices {
 		desc := dev.Descriptor
 
 		vendorName := usb.VendorName(desc.VendorID)
 		productName := usb.ProductName(desc.VendorID, desc.ProductID)
 
-		// Try to get from sysfs first (faster)
 		if productName == "" && dev.SysfsStrings != nil {
 			if sysfsProduct := dev.SysfsStrings.Product; sysfsProduct != "" {
 				productName = sysfsProduct
 			}
 		}
 
-		fmt.Printf("Bus %03d Device %03d: ID %04x:%04x %s %s\n",
+		portSuffix := ""
+		if dev.Port != 0 && collisions[busAddr{dev.Bus, dev.Address}] {
+			portSuffix = fmt.Sprintf(" [port %d]", dev.Port)
+		}
+
+		fmt.Printf("Bus %03d Device %03d: ID %04x:%04x %s %s%s\n",
 			dev.Bus, dev.Address,
 			desc.VendorID, desc.ProductID,
-			vendorName, productName)
+			vendorName, productName, portSuffix)
 	}
 }
 
@@ -275,16 +296,16 @@ func displayTree(devices []*usb.Device) {
 		return buses[i] < buses[j]
 	})
 
-	// Display tree in lsusb format
 	for _, bus := range buses {
 		busDevices := busMap[bus]
 
-		// Sort devices by address
 		sort.Slice(busDevices, func(i, j int) bool {
-			return busDevices[i].Address < busDevices[j].Address
+			if busDevices[i].Address != busDevices[j].Address {
+				return busDevices[i].Address < busDevices[j].Address
+			}
+			return busDevices[i].Port < busDevices[j].Port
 		})
 
-		// Find root hub
 		var rootHub *usb.Device
 		var otherDevices []*usb.Device
 
@@ -303,7 +324,6 @@ func displayTree(devices []*usb.Device) {
 			fmt.Printf("/:  Bus %03d.Port 001: Dev 001, Class=root_hub, Driver=xhci_hcd/%dp, %s\n",
 				bus, maxPorts, speed)
 
-			// Display connected devices
 			for _, dev := range otherDevices {
 				displayDeviceTree(dev, "    ")
 			}
@@ -450,10 +470,13 @@ func displayDeviceTree(dev *usb.Device, indent string) {
 	className := getDeviceClassName(dev.Descriptor.DeviceClass)
 	speed := getSpeedString(dev)
 
-	// For now, use a simplified port number (would need proper topology parsing)
-	portNum := int(dev.Address) - 1
-	if portNum < 1 {
-		portNum = 1
+	portNum := int(dev.Port)
+	if portNum == 0 {
+		// Port not populated on this platform; approximate from address.
+		portNum = int(dev.Address) - 1
+		if portNum < 1 {
+			portNum = 1
+		}
 	}
 
 	fmt.Printf("%s|__ Port %03d: Dev %03d, If 0, Class=%s, Driver=[unknown], %s\n",

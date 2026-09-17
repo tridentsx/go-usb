@@ -143,6 +143,7 @@ func DeviceList(opts ...DeviceListOption) ([]*Device, error) {
 			device.devicePath = m.openPath
 		}
 		device.Bus = buses[m.loc.RootInst]
+		device.Port = uint8(m.loc.Port)
 
 		if hub, err := hubs.get(m.loc.HubPath); err == nil {
 			describeFromHub(device, hub, m.loc.Port)

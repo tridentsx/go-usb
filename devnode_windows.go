@@ -60,6 +60,7 @@ func cmGetDeviceID(devInst uint32) (string, error) {
 }
 
 // cmGetPortNumber reads CM_DRP_ADDRESS, a USB device's port on its parent hub.
+// USB ports are 1-based; a return of 0 means the property is unset.
 func cmGetPortNumber(devInst uint32) (int, error) {
 	var value uint32
 	length := uint32(unsafe.Sizeof(value))
@@ -67,6 +68,10 @@ func cmGetPortNumber(devInst uint32) (int, error) {
 		uintptr(devInst), uintptr(cmDRPAddress), 0,
 		uintptr(unsafe.Pointer(&value)), uintptr(unsafe.Pointer(&length)), 0)
 	if r0 != crSuccess {
+		return 0, ErrNotFound
+	}
+	if value == 0 {
+		// Port 0 is not valid in USB; treat it as "address not available".
 		return 0, ErrNotFound
 	}
 	return int(value), nil
