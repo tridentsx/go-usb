@@ -195,7 +195,9 @@ func describeFromHub(device *Device, hub windows.Handle, port int) {
 		return
 	}
 
-	device.Address = uint8(nc.DeviceAddress)
+	// Shift by 1 so root hub holds address 1 and real devices start at 2,
+	// matching the Linux USB address convention.
+	device.Address = uint8(nc.DeviceAddress + 1)
 	if nc.Descriptor.Length == 18 {
 		device.Descriptor = nc.Descriptor
 	}
