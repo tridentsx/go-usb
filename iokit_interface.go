@@ -160,3 +160,21 @@ type ioUSBFindInterfaceRequest struct {
 	bInterfaceProtocol uint16
 	bAlternateSetting  uint16
 }
+
+// ioUSBIsocFrame mirrors IOUSBIsocFrame from IOKit/usb/USB.h, one element of
+// the array ReadIsochPipeAsync/WriteIsochPipeAsync take and fill in per frame:
+//
+//	typedef struct IOUSBIsocFrame
+//	{
+//	    IOReturn frStatus;
+//	    UInt16   frReqCount;
+//	    UInt16   frActCount;
+//	} IOUSBIsocFrame;
+//
+// IOReturn is a plain SInt32, so the three fields total 8 bytes with no
+// padding.
+type ioUSBIsocFrame struct {
+	frStatus   int32
+	frReqCount uint16
+	frActCount uint16
+}

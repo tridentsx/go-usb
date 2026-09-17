@@ -71,11 +71,31 @@ type IOUSBDeviceInterface struct {
 }
 
 // IOUSBInterfaceInterface wraps IOKit's IOUSBInterfaceInterface.
-//
-// Its own method table is not transcribed yet, so transfers on an interface
-// still report ErrNotSupported.
 type IOUSBInterfaceInterface struct {
 	handle unsafe.Pointer
+
+	// The fields below back the async event pump isochronous transfers need.
+	// It is started lazily, once, on first use, and stopped when the
+	// interface is released; see ensureAsyncPump and stopAsyncPump in
+	// purego_isochronous_darwin.go.
+	asyncMu      sync.Mutex
+	asyncStarted bool
+	asyncErr     error
+	runLoop      uintptr
+	asyncMode    uintptr // a CFString for kCFRunLoopDefaultMode, released at stop
+	asyncStopped bool
+	asyncReady   chan struct{}
+	asyncDone    chan struct{}
+
+	// callback is one IOAsyncCallback1 trampoline, reused for every
+	// isochronous transfer on this interface: purego.NewCallback's allocation
+	// is never freed, so creating one per Submit would exhaust its pool
+	// under any real workload. pending correlates a completion back to its
+	// transfer via arg0, which IOKit documents as the frameList pointer the
+	// read/write call was given.
+	callback  uintptr
+	pendingMu sync.Mutex
+	pending   map[uintptr]*IsochronousTransfer
 }
 
 // DeviceHandle represents an open USB device on macOS.

@@ -144,3 +144,28 @@ func TestIOUSBFindInterfaceRequestLayout(t *testing.T) {
 		t.Errorf("sizeof(ioUSBFindInterfaceRequest) = %d, want 8", size)
 	}
 }
+
+// TestIOUSBIsocFrameLayout pins the layout ReadIsochPipeAsync and
+// WriteIsochPipeAsync require for their frame list argument.
+func TestIOUSBIsocFrameLayout(t *testing.T) {
+	var f ioUSBIsocFrame
+
+	tests := []struct {
+		name string
+		got  uintptr
+		want uintptr
+	}{
+		{"frStatus", unsafe.Offsetof(f.frStatus), 0},
+		{"frReqCount", unsafe.Offsetof(f.frReqCount), 4},
+		{"frActCount", unsafe.Offsetof(f.frActCount), 6},
+	}
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("offset of %s = %d, want %d", tt.name, tt.got, tt.want)
+		}
+	}
+
+	if size := unsafe.Sizeof(f); size != 8 {
+		t.Errorf("sizeof(ioUSBIsocFrame) = %d, want 8", size)
+	}
+}

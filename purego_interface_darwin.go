@@ -45,6 +45,7 @@ func (i *IOUSBInterfaceInterface) release() {
 	if i == nil || i.handle == nil {
 		return
 	}
+	i.stopAsyncPump()
 	releaseCOMInterface(i.handle)
 	i.handle = nil
 }
@@ -113,6 +114,96 @@ func (i *IOUSBInterfaceInterface) ClearPipeStall(pipeRef uint8) error {
 		return ErrDeviceNotFound
 	}
 	ret, _, _ := purego.SyscallN(v.ClearPipeStall, uintptr(i.handle), uintptr(pipeRef))
+	if int32(ret) != kernSuccess {
+		return ErrIO
+	}
+	return nil
+}
+
+// AbortPipe aborts all outstanding I/O on a pipe, including any isochronous
+// transfer this process has in flight there. IOKit has no way to cancel one
+// specific request; this is the mechanism it offers, and the aborted
+// transfer(s) still complete normally through their callback, now with an
+// error status.
+func (i *IOUSBInterfaceInterface) AbortPipe(pipeRef uint8) error {
+	v := i.vtable()
+	if v == nil || v.AbortPipe == 0 {
+		return ErrDeviceNotFound
+	}
+	ret, _, _ := purego.SyscallN(v.AbortPipe, uintptr(i.handle), uintptr(pipeRef))
+	if int32(ret) != kernSuccess {
+		return ErrIO
+	}
+	return nil
+}
+
+// GetBusFrameNumber returns the current USB bus frame number, the basis for
+// choosing an isochronous transfer's start frame.
+func (i *IOUSBInterfaceInterface) GetBusFrameNumber() (uint64, error) {
+	v := i.vtable()
+	if v == nil || v.GetBusFrameNumber == 0 {
+		return 0, ErrDeviceNotFound
+	}
+	var frame uint64
+	var atTime [2]uint32 // AbsoluteTime; its value is not used here
+	ret, _, _ := purego.SyscallN(v.GetBusFrameNumber, uintptr(i.handle),
+		uintptr(unsafe.Pointer(&frame)), uintptr(unsafe.Pointer(&atTime)))
+	if int32(ret) != kernSuccess {
+		return 0, ErrIO
+	}
+	return frame, nil
+}
+
+// CreateInterfaceAsyncEventSource creates the CFRunLoopSource IOKit delivers
+// this interface's asynchronous completions through. The caller adds it to
+// whichever run loop will service them.
+func (i *IOUSBInterfaceInterface) CreateInterfaceAsyncEventSource() (uintptr, error) {
+	v := i.vtable()
+	if v == nil || v.CreateInterfaceAsyncEventSource == 0 {
+		return 0, ErrDeviceNotFound
+	}
+	var source uintptr
+	ret, _, _ := purego.SyscallN(v.CreateInterfaceAsyncEventSource, uintptr(i.handle), uintptr(unsafe.Pointer(&source)))
+	if int32(ret) != kernSuccess || source == 0 {
+		return 0, ErrIO
+	}
+	return source, nil
+}
+
+// readIsochPipeAsync and writeIsochPipeAsync submit an isochronous transfer.
+// callback is IOKit's IOAsyncCallback1: void(*)(void *refcon, IOReturn
+// result, void *arg0). IOKit sets arg0 to frameList on completion, which is
+// how the shared callback in purego_isochronous_darwin.go finds its way back
+// to the right *IsochronousTransfer without allocating a trampoline per
+// transfer.
+func (i *IOUSBInterfaceInterface) readIsochPipeAsync(pipeRef uint8, buf []byte, frameStart uint64, numFrames uint32, frameList *ioUSBIsocFrame, callback uintptr) error {
+	v := i.vtable()
+	if v == nil || v.ReadIsochPipeAsync == 0 {
+		return ErrDeviceNotFound
+	}
+	var bufPtr unsafe.Pointer
+	if len(buf) > 0 {
+		bufPtr = unsafe.Pointer(&buf[0])
+	}
+	ret, _, _ := purego.SyscallN(v.ReadIsochPipeAsync, uintptr(i.handle), uintptr(pipeRef), uintptr(bufPtr),
+		uintptr(frameStart), uintptr(numFrames), uintptr(unsafe.Pointer(frameList)), callback, 0)
+	if int32(ret) != kernSuccess {
+		return ErrIO
+	}
+	return nil
+}
+
+func (i *IOUSBInterfaceInterface) writeIsochPipeAsync(pipeRef uint8, buf []byte, frameStart uint64, numFrames uint32, frameList *ioUSBIsocFrame, callback uintptr) error {
+	v := i.vtable()
+	if v == nil || v.WriteIsochPipeAsync == 0 {
+		return ErrDeviceNotFound
+	}
+	var bufPtr unsafe.Pointer
+	if len(buf) > 0 {
+		bufPtr = unsafe.Pointer(&buf[0])
+	}
+	ret, _, _ := purego.SyscallN(v.WriteIsochPipeAsync, uintptr(i.handle), uintptr(pipeRef), uintptr(bufPtr),
+		uintptr(frameStart), uintptr(numFrames), uintptr(unsafe.Pointer(frameList)), callback, 0)
 	if int32(ret) != kernSuccess {
 		return ErrIO
 	}
