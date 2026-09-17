@@ -56,7 +56,7 @@ func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index 
 		if e1 != windows.ERROR_IO_PENDING {
 			return 0, fmt.Errorf("WinUsb_ControlTransfer failed: %w", e1)
 		}
-		return h.awaitOverlapped(event, &overlapped, 0, timeout, false)
+		return h.awaitOverlapped(event, &overlapped, 0, 0, timeout)
 	}
 
 	return int(transferred), nil
@@ -69,14 +69,15 @@ func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index 
 // actually completes, the kernel may still write into the OVERLAPPED structure
 // and the caller's data buffer, both of which live on the Go heap.
 //
-// endpoint is only used to abort a pipe; pass 0 for control transfers, which
-// are cancelled with CancelIoEx instead.
+// ifaceHdl and endpoint are used to abort a pipe on timeout; pass
+// winusbInterfaceHandle(0) / 0 for control transfers, which are cancelled
+// with CancelIoEx instead.
 func (h *DeviceHandle) awaitOverlapped(
 	event windows.Handle,
 	overlapped *windows.Overlapped,
+	ifaceHdl winusbInterfaceHandle,
 	endpoint uint8,
 	timeout time.Duration,
-	isPipe bool,
 ) (int, error) {
 	timeoutMs := uint32(windows.INFINITE)
 	if timeout > 0 {
@@ -97,8 +98,8 @@ func (h *DeviceHandle) awaitOverlapped(
 		return int(transferred), nil
 
 	case uint32(windows.WAIT_TIMEOUT):
-		if isPipe {
-			syscall.SyscallN(procWinUsb_AbortPipe.Addr(), uintptr(h.winusbHandle), uintptr(endpoint))
+		if ifaceHdl != 0 {
+			syscall.SyscallN(procWinUsb_AbortPipe.Addr(), uintptr(ifaceHdl), uintptr(endpoint))
 		} else {
 			windows.CancelIoEx(h.fileHandle, overlapped)
 		}
@@ -137,12 +138,14 @@ func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, time
 		return h.hid.interruptTransfer(endpoint, data, timeout)
 	}
 
+	ifaceHdl := h.getInterfaceHandle(h.interfaceForEndpoint(endpoint))
+
 	// Set timeout for the pipe
 	if timeout > 0 {
 		ms := uint32(timeout.Milliseconds())
 		syscall.SyscallN(
 			procWinUsb_SetPipePolicy.Addr(),
-			uintptr(h.winusbHandle),
+			uintptr(ifaceHdl),
 			uintptr(endpoint),
 			uintptr(PIPE_TRANSFER_TIMEOUT),
 			uintptr(4),
@@ -157,7 +160,6 @@ func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, time
 
 	var transferred uint32
 
-	// Create overlapped structure
 	var overlapped windows.Overlapped
 	event, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
@@ -166,16 +168,13 @@ func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, time
 	defer windows.CloseHandle(event)
 	overlapped.HEvent = event
 
-	// Determine if this is a read or write based on endpoint direction
-	isRead := (endpoint & 0x80) != 0
-
 	var r0 uintptr
 	var e1 error
 
-	if isRead {
+	if endpoint&0x80 != 0 {
 		r0, _, e1 = syscall.SyscallN(
 			procWinUsb_ReadPipe.Addr(),
-			uintptr(h.winusbHandle),
+			uintptr(ifaceHdl),
 			uintptr(endpoint),
 			uintptr(dataPtr),
 			uintptr(len(data)),
@@ -185,7 +184,7 @@ func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, time
 	} else {
 		r0, _, e1 = syscall.SyscallN(
 			procWinUsb_WritePipe.Addr(),
-			uintptr(h.winusbHandle),
+			uintptr(ifaceHdl),
 			uintptr(endpoint),
 			uintptr(dataPtr),
 			uintptr(len(data)),
@@ -196,7 +195,7 @@ func (h *DeviceHandle) BulkTransferWithOptions(endpoint uint8, data []byte, time
 
 	if r0 == 0 {
 		if e1 == windows.ERROR_IO_PENDING {
-			return h.awaitOverlapped(event, &overlapped, endpoint, timeout, true)
+			return h.awaitOverlapped(event, &overlapped, ifaceHdl, endpoint, timeout)
 		}
 		return 0, fmt.Errorf("bulk transfer failed: %w", e1)
 	}
