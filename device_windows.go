@@ -387,9 +387,10 @@ func (h *DeviceHandle) ClearHalt(endpoint uint8) error {
 		return ErrDeviceNotFound
 	}
 
+	ifaceHdl := h.getInterfaceHandle(h.interfaceForEndpoint(endpoint))
 	r0, _, e1 := syscall.SyscallN(
 		procWinUsb_ResetPipe.Addr(),
-		uintptr(h.winusbHandle),
+		uintptr(ifaceHdl),
 		uintptr(endpoint),
 	)
 	if r0 == 0 {
@@ -679,12 +680,13 @@ func (h *DeviceHandle) SetPipePolicy(endpoint uint8, policyType uint32, value ui
 		return ErrDeviceNotFound
 	}
 
+	ifaceHdl := h.getInterfaceHandle(h.interfaceForEndpoint(endpoint))
 	r0, _, e1 := syscall.SyscallN(
 		procWinUsb_SetPipePolicy.Addr(),
-		uintptr(h.winusbHandle),
+		uintptr(ifaceHdl),
 		uintptr(endpoint),
 		uintptr(policyType),
-		uintptr(4), // size of uint32
+		uintptr(4),
 		uintptr(unsafe.Pointer(&value)),
 	)
 	if r0 == 0 {
