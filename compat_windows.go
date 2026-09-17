@@ -198,6 +198,7 @@ func describeFromHub(device *Device, hub windows.Handle, port int) {
 	// Shift by 1 so root hub holds address 1 and real devices start at 2,
 	// matching the Linux USB address convention.
 	device.Address = uint8(nc.DeviceAddress + 1)
+	device.Speed = speedToSpeed(nc.Speed)
 	if nc.Descriptor.Length == 18 {
 		device.Descriptor = nc.Descriptor
 	}
@@ -593,11 +594,22 @@ func describeRootHub(devInst uint32, bus uint8) *Device {
 		}
 	}
 
+	var speed Speed
+	switch {
+	case usbVersion >= 0x0300:
+		speed = SpeedSuper
+	case usbVersion >= 0x0200:
+		speed = SpeedHigh
+	default:
+		speed = SpeedFull
+	}
+
 	dev := &Device{
 		Path:       hubPath,
 		devicePath: hubPath,
 		Bus:        bus,
 		Address:    1,
+		Speed:      speed,
 		devInst:    devInst,
 		Descriptor: DeviceDescriptor{
 			VendorID:    vid,

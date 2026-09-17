@@ -39,6 +39,7 @@ type Device struct {
 	Path         string
 	Bus          uint8
 	Address      uint8
+	Speed        Speed
 	Descriptor   DeviceDescriptor
 	Configs      []RawConfigDescriptor
 	SysfsStrings *SysfsStrings

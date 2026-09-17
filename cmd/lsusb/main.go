@@ -378,7 +378,21 @@ func getProtocolDescription(class, protocol uint8) string {
 }
 
 func getSpeedString(dev *usb.Device) string {
-	// Try to read speed from sysfs
+	// Use the speed cached during enumeration when available (e.g. Windows hub IOCTL).
+	if dev.Speed != usb.SpeedUnknown {
+		switch dev.Speed {
+		case usb.SpeedLow:
+			return "1.5M"
+		case usb.SpeedFull:
+			return "12M"
+		case usb.SpeedHigh:
+			return "480M"
+		case usb.SpeedSuper:
+			return "5000M"
+		}
+	}
+
+	// Try to read speed from sysfs (Linux).
 	sysfsPath := fmt.Sprintf("/sys/bus/usb/devices/%s", getSysfsDeviceName(dev))
 	if speedData, err := os.ReadFile(filepath.Join(sysfsPath, "speed")); err == nil {
 		speed := strings.TrimSpace(string(speedData))
@@ -400,7 +414,7 @@ func getSpeedString(dev *usb.Device) string {
 		}
 	}
 
-	// Fallback based on USB version
+	// Fallback based on USB version.
 	version := dev.Descriptor.USBVersion
 	if version >= 0x0300 {
 		return "5000M"
