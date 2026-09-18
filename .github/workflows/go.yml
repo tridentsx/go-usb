@@ -7,19 +7,26 @@ on:
     branches: [ "main" ]
 
 jobs:
-  # Native jobs on Linux and macOS. CGO_ENABLED is no longer a matrix
-  # dimension: every backend (Linux, macOS via purego, Windows) is cgo-free
-  # (see #14), so CGO_ENABLED=1 and =0 build the identical set of files on
-  # every platform. Left explicit at 0 anyway, so a reintroduced `import "C"`
-  # fails the build here rather than silently starting to require a C
-  # toolchain again.
+  # Native jobs on Linux, macOS and Windows. CGO_ENABLED is no longer a
+  # matrix dimension: every backend (Linux, macOS via purego, Windows) is
+  # cgo-free (see #14), so CGO_ENABLED=1 and =0 build the identical set of
+  # files on every platform. Left explicit at 0 anyway, so a reintroduced
+  # `import "C"` fails the build here rather than silently starting to
+  # require a C toolchain again.
+  #
+  # windows-latest joined ubuntu-latest/macos-latest here so that
+  # roothub_windows_test.go/usbioctl_wire_windows_test.go actually run
+  # instead of only being compiled by the cross-compile job below -- both
+  # are pure parsing/arithmetic checks with no real USB hardware dependency,
+  # matching the same "test framing logic on every host" pattern the other
+  # platforms' test files already use.
   native:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
     env:
       CGO_ENABLED: '0'
     steps:
@@ -43,6 +50,11 @@ jobs:
   # Windows' lazy DLL loading), so all three cross-compile and type-check
   # from one Linux runner without needing a machine for every OS in the
   # matrix -- macOS included, which needed a real Mac before #14.
+  #
+  # windows/amd64 is deliberately not listed here: windows-latest in the
+  # native job above already builds, vets and tests it for real, natively.
+  # windows/arm64 stays here because GitHub Actions has no native arm64
+  # Windows runner to do the same for it.
   cross-compile:
     name: cross-compile ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
@@ -50,8 +62,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - goos: windows
-          goarch: amd64
         - goos: windows
           goarch: arm64
         - goos: darwin
