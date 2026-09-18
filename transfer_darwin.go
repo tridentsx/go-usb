@@ -16,6 +16,10 @@ func (h *DeviceHandle) ControlTransfer(requestType, request uint8, value, index 
 		return 0, ErrDeviceNotFound
 	}
 
+	if h.hid != nil {
+		return h.hidControlTransfer(requestType, request, value, index, data)
+	}
+
 	timeoutMs := uint32(timeout.Milliseconds())
 	if timeoutMs == 0 {
 		timeoutMs = 5000 // Default 5 second timeout
@@ -45,6 +49,12 @@ func (h *DeviceHandle) bulkTransfer(endpoint uint8, data []byte, timeout time.Du
 	// Handle zero-length packets
 	if len(data) == 0 && !allowZeroLength {
 		return 0, ErrInvalidParameter
+	}
+
+	if h.hid != nil {
+		// A HID interface has no bulk endpoints. Interrupt endpoints are
+		// reached through this same call, routed to a report.
+		return h.hid.interruptTransfer(endpoint, data, timeout)
 	}
 
 	// Determine interface from endpoint
@@ -99,6 +109,10 @@ func (h *DeviceHandle) InterruptTransfer(endpoint uint8, data []byte, timeout ti
 	}
 	if len(data) == 0 {
 		return 0, ErrInvalidParameter
+	}
+
+	if h.hid != nil {
+		return h.hid.interruptTransfer(endpoint, data, timeout)
 	}
 
 	var intf *IOUSBInterfaceInterface

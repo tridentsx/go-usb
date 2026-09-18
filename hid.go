@@ -17,6 +17,23 @@ import (
 // refuses read or write access to them anyway, but more importantly a USB
 // library is the wrong place to read keystrokes from.
 
+// HID class request codes, from the HID specification.
+const (
+	hidRequestGetReport   = 0x01
+	hidRequestGetIdle     = 0x02
+	hidRequestGetProtocol = 0x03
+	hidRequestSetReport   = 0x09
+	hidRequestSetIdle     = 0x0A
+	hidRequestSetProtocol = 0x0B
+)
+
+// HID report types, as they appear in the high byte of wValue.
+const (
+	hidReportTypeInput   = 0x01
+	hidReportTypeOutput  = 0x02
+	hidReportTypeFeature = 0x03
+)
+
 // HID usage pages and usages, from the HID Usage Tables.
 const (
 	hidUsagePageGenericDesktop = 0x01

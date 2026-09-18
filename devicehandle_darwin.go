@@ -40,6 +40,11 @@ func (h *DeviceHandle) Close() error {
 	h.interfaces = nil
 	h.claimedIfaces = nil
 
+	if h.hid != nil {
+		h.hid.close()
+		h.hid = nil
+	}
+
 	if h.devInterface != nil {
 		h.devInterface.closeDevice()
 		h.devInterface.release()
@@ -106,6 +111,24 @@ func (h *DeviceHandle) ClaimInterface(iface uint8) error {
 	}
 	if err := intf.open(); err != nil {
 		intf.release()
+
+		// kIOReturnExclusiveAccess (mapped to ErrDeviceBusy by intf.open)
+		// means IOUSBHIDDriver already has this interface open exclusively --
+		// expected for a device that presents itself as HID rather than a
+		// vendor interface, the same signal WinUsb_Initialize failing is on
+		// Windows. Fall back to the IOHIDDevice transport, reachable as this
+		// interface's own child in the registry. See hid_darwin.go.
+		if err == ErrDeviceBusy {
+			hidDev, hidErr := openHIDInterface(h, iface, service)
+			if hidErr == nil {
+				h.hid = hidDev
+				h.claimedIfaces[iface] = true
+				return nil
+			}
+			if hidErr == ErrNotSupported {
+				return fmt.Errorf("interface exposes only pointing or keyboard collections: %w", ErrNotSupported)
+			}
+		}
 		return err
 	}
 
@@ -130,6 +153,10 @@ func (h *DeviceHandle) ReleaseInterface(iface uint8) error {
 		intf.closeInterface()
 		intf.release()
 		delete(h.interfaces, iface)
+	}
+	if h.hid != nil && h.hid.ownsInterface(iface) {
+		h.hid.close()
+		h.hid = nil
 	}
 	delete(h.claimedIfaces, iface)
 	return nil
@@ -249,11 +276,21 @@ func (h *DeviceHandle) GetConfigDescriptor(index uint8) (*ConfigDescriptor, erro
 	if h.closed || h.devInterface == nil {
 		return nil, ErrDeviceNotFound
 	}
+	return fetchConfigDescriptor(h.devInterface, index)
+}
 
+// fetchConfigDescriptor reads and parses a configuration descriptor directly
+// off dev, with no locking of its own.
+//
+// Split out of GetConfigDescriptor so that ClaimInterface's HID fallback
+// (openHIDInterface in hid_darwin.go) can read the descriptor too: it runs
+// while ClaimInterface already holds h.mu.Lock(), and GetConfigDescriptor's
+// own h.mu.RLock() would deadlock against that.
+func fetchConfigDescriptor(dev *IOUSBDeviceInterface, index uint8) (*ConfigDescriptor, error) {
 	// Read the 9-byte header first to learn wTotalLength, then re-read the
 	// whole descriptor now that its size is known.
 	header := make([]byte, 9)
-	_, err := h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+	_, err := dev.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
 		descriptorRequestValue(USB_DT_CONFIG, index), 0, header, 5000)
 	if err != nil {
 		return nil, err
@@ -265,7 +302,7 @@ func (h *DeviceHandle) GetConfigDescriptor(index uint8) (*ConfigDescriptor, erro
 	}
 
 	full := make([]byte, totalLength)
-	_, err = h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+	_, err = dev.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
 		descriptorRequestValue(USB_DT_CONFIG, index), 0, full, 5000)
 	if err != nil {
 		return nil, err

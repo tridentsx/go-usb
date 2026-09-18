@@ -308,7 +308,7 @@ or the underlying mechanism is worth knowing about.
 | `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` | `ErrNotSupported`, use `AsyncTransfer` | yes | `ErrNotSupported`, use `AsyncTransfer` |
 | Bulk streams (`AllocStreams`) | yes | not implemented — possible, see below | not implemented — possible, see below |
 | `DetachKernelDriver` / `AttachKernelDriver` | yes (`USBDEVFS_DISCONNECT`) | `ErrNotSupported` | `ErrNotSupported` |
-| HID-class devices | raw, after detaching `usbhid` (most capable: vendor control too) | not implemented — possible, see below | report-level only via `hid.dll`, no vendor control |
+| HID-class devices | raw, after detaching `usbhid` (most capable: vendor control too) | report-level only via `IOHIDDevice`, no vendor control | report-level only via `hid.dll`, no vendor control |
 | `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
 | Hotplug notifications (`RegisterHotplugCallback`) | not yet | yes (IOKit, verified against a real unplug/replug) | yes (`RegisterDeviceNotification`/`WM_DEVICECHANGE`) |
@@ -385,9 +385,8 @@ A lot of test equipment presents itself as a standard HID device so that it
 needs no driver installation: some report measurements directly in input
 reports, others tunnel a serial protocol over reports. There is no parity
 between platforms here — Linux is the most capable (raw access, including
-vendor control requests, once `usbhid` is detached), Windows is report-level
-only (no vendor control, no bulk, no isochronous), and macOS cannot open HID
-devices at all yet.
+vendor control requests, once `usbhid` is detached), and Windows and macOS are
+both report-level only (no vendor control, no bulk, no isochronous).
 
 On **Windows** such a device is opened through `hid.dll` automatically. `Open`
 tries WinUSB first and falls back to the HID transport, so no caller change is
@@ -418,11 +417,24 @@ On **Linux** you can call `DetachKernelDriver` to unbind `usbhid` and then use
 raw transfers, which needs root or a udev rule. That is more capable than the
 Windows HID path, since it carries vendor control requests too.
 
-On **macOS** HID devices enumerate but cannot currently be opened: `IOHIDFamily`
-owns them and the backend has no IOHIDManager transport yet. Not fundamentally
-impossible — `IOHIDManager`/`IOHIDDevice` in `IOKit.framework` is the real API
-for it — just not implemented, the same "not implemented, not impossible"
-situation as bulk streams above.
+On **macOS** `ClaimInterface` falls back to the HID transport automatically
+when `IOUSBHIDDriver` already owns the interface exclusively (the same signal
+`WinUsb_Initialize` failing is on Windows), reached through `IOHIDDevice`
+rather than `IOHIDManager` device matching: the driver holding the interface
+is itself an `IOHIDDevice`, found directly as the interface's own child in the
+IOKit registry. What works, and what doesn't, matches the Windows list above
+(`InterruptTransfer`, `GetFeatureReport`/`SetFeatureReport`/`GetInputReport`/
+`SetOutputReport`, `FlushHIDQueue`, `HIDReportLengths`, `IsHID`; no vendor
+control, bulk or isochronous), with two macOS-specific notes:
+
+- `GetInputReport`'s on-demand poll is documented by Apple as having
+  "sporadic device support" — `InterruptTransfer`, which waits on an
+  asynchronous report callback instead, is the reliable way to receive input
+  reports here.
+- Only one HID interface per device handle is currently supported. A
+  composite device exposing more than one HID interface only gets the most
+  recently claimed one, the same limitation class as the Windows backend's
+  "only the first WinUSB function is used" note above.
 
 ### `Device.Path` is platform-specific
 

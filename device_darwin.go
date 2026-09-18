@@ -118,6 +118,11 @@ type DeviceHandle struct {
 	claimedIfaces map[uint8]bool
 	mu            sync.RWMutex
 	closed        bool
+
+	// hid is non-nil when a claimed interface is owned by IOUSBHIDDriver and
+	// reached through the IOHIDDevice transport in hid_darwin.go rather than a
+	// normal IOUSBInterfaceInterface. See ClaimInterface's fallback.
+	hid *hidDevice
 }
 
 // IOKitEnumerator handles USB device enumeration via IOKit.

@@ -108,6 +108,10 @@ func loadIOKit() (*iokitFuncs, error) {
 
 		// Notification-port and run-loop entry points, used for hotplug.
 		registerHotplugFuncs(ioKit, cf)
+
+		// IOHIDDevice and registry-walk entry points, used for the HID
+		// transport a HID-class interface falls back to.
+		registerHIDFuncs(ioKit, cf)
 	})
 
 	if iokitErr != nil {
