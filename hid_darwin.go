@@ -118,6 +118,20 @@ type hidCollection struct {
 	mode        uintptr
 	pumpReady   chan struct{}
 	pumpDone    chan struct{}
+
+	// pumpPinner keeps the input-report buffer passed to
+	// IOHIDDeviceRegisterInputReportCallback pinned for as long as the
+	// callback is registered. Without it, the buffer is reachable from Go
+	// only through this goroutine's own liveness-analyzed stack frame,
+	// which the compiler considers dead (eligible for GC) once the
+	// function's remaining code never reads it again -- even though IOKit
+	// still holds and writes to the same raw address for the pump's entire
+	// life. Found by hitting exactly this on real hardware: the callback
+	// never fired at all, with no error, while the synchronous
+	// IOHIDDeviceGetReport equivalent worked reliably against the same
+	// device -- a difference that pointed at exactly this asymmetry (one
+	// holds no pointer past its own call, the other does).
+	pumpPinner runtime.Pinner
 }
 
 // hidDevice is the HID transport for one USB device, matching hid_windows.go's
@@ -476,6 +490,30 @@ func (c *hidCollection) flush() error {
 // isochronous_darwin.go: one goroutine locked to an OS thread, running a
 // CFRunLoop that IOHIDDeviceScheduleWithRunLoop delivers input-report
 // completions through.
+//
+// STILL OPEN as of 2026-09-18: on one real test board (an FX2LP-based
+// dummy HID device, see go-usb-jig), IOHIDDeviceRegisterInputReportCallback
+// never actually fired here, even though the exact same device answered
+// IOHIDDeviceGetReport(kIOHIDReportTypeInput) correctly and repeatedly,
+// proving the device really was sending live, changing reports. Ruled out,
+// each verified on real hardware: the buffer-pinning bug this file's
+// pumpPinner field now fixes (a real bug, independently necessary, but not
+// sufficient by itself); CFRunLoop mode identity (real dlsym'd
+// kCFRunLoopDefaultMode vs. a locally-rebuilt equal CFString vs. a private
+// mode of this package's own -- all three tried); RegisterInputReportCallback/
+// ScheduleWithRunLoop call order; CFRunLoopRunInMode's
+// returnAfterSourceHandled parameter and poll interval. Most tellingly: an
+// independent, real, already-shipping purego HID library
+// (github.com/go-macos/iokit), using IOHIDManager-vended device references
+// rather than this file's IOHIDDeviceCreate-from-a-known-service approach,
+// exhibited the identical symptom against the identical device -- strong
+// evidence this is not a bug in this file's approach specifically, but
+// either a property of that one test device/firmware or of the test
+// machine's kernel-level HID interrupt polling. GetFeatureReport,
+// SetFeatureReport, SetOutputReport, GetInputReport and FlushHIDQueue are
+// all independently verified working against real hardware; only this
+// pump's callback delivery remains unverified. See go-usb-jig's README for
+// the full record.
 
 // startInputPump starts the collection's async input-report pump.
 func (c *hidCollection) startInputPump() error {
@@ -496,7 +534,15 @@ func (c *hidCollection) startInputPump() error {
 		return err
 	}
 
-	mode := k.cfStringRef("kCFRunLoopDefaultMode")
+	// A private mode of this package's own, not kCFRunLoopDefaultMode: the
+	// goroutine below is pinned to an OS thread, but Go recycles OS threads
+	// across goroutines, so kCFRunLoopDefaultMode on that thread may carry
+	// sources some unrelated package scheduled on a previous goroutine that
+	// ran there. A mode nobody else names can only ever carry what this
+	// pump scheduled in it. CFRunLoop compares mode names by value (see
+	// cfStringRef's own comment), so this needs no real exported symbol
+	// either, exactly like kCFRunLoopDefaultMode's own local rebuild below.
+	mode := k.cfStringRef("com.tridentsx.go-usb.hid.pump")
 	if mode == 0 {
 		c.pumpMu.Lock()
 		c.pumpErr = ErrOther
@@ -508,6 +554,7 @@ func (c *hidCollection) startInputPump() error {
 	var reportBufPtr *byte
 	if len(reportBuf) > 0 {
 		reportBufPtr = &reportBuf[0]
+		c.pumpPinner.Pin(reportBufPtr)
 	}
 
 	callback := purego.NewCallback(func(context uintptr, result int32, sender uintptr, reportType int32, reportID uint32, report unsafe.Pointer, reportLength int64) {
@@ -562,11 +609,20 @@ func (c *hidCollection) startInputPump() error {
 			if stopped {
 				break
 			}
-			hotplug.CFRunLoopRunInMode(mode, 3600, true)
+			// false, not true, and a short poll rather than a long block:
+			// matches a real, independently-verified-working purego HID
+			// implementation (go-macos/iokit), tried here on the chance the
+			// difference mattered. It didn't, on its own: see the "still
+			// open" note on IOHIDDeviceRegisterInputReportCallback's
+			// reliability below. Kept anyway, since it is not worse than
+			// the isochronous/bulk async pump's own true+3600s pattern and
+			// costs nothing extra.
+			hotplug.CFRunLoopRunInMode(mode, 0.05, false)
 		}
 
 		hid.IOHIDDeviceUnscheduleFromRunLoop(c.device, rl, mode)
 		k.CFRelease(mode)
+		c.pumpPinner.Unpin()
 		close(c.pumpDone)
 	}()
 
