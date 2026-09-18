@@ -1,4 +1,4 @@
-module github.com/kevmo314/go-usb
+module github.com/tridentsx/go-usb
 
 go 1.25.0
 

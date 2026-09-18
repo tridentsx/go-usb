@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	usb "github.com/kevmo314/go-usb"
+	usb "github.com/tridentsx/go-usb"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/kevmo314/go-usb"
+	"github.com/tridentsx/go-usb"
 )
 
 func main() {

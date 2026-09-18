@@ -1,11 +1,13 @@
-# github.com/kevmo314/go-usb
+# github.com/tridentsx/go-usb
+
+This is a fork of [github.com/kevmo314/go-usb](https://github.com/kevmo314/go-usb).
 
 A cross-platform Go library for USB device communication, providing a
 libusb-like interface, without cgo and without libusb.
 
 ## Goal
 
-One API, `import "github.com/kevmo314/go-usb"` and nothing else, that talks
+One API, `import "github.com/tridentsx/go-usb"` and nothing else, that talks
 to real USB hardware on Linux, macOS and Windows through each OS's native
 interface — usbfs, IOKit and WinUSB/SetupAPI respectively — with **no cgo,
 no C toolchain, and no libusb dependency, on any platform**:
@@ -45,7 +47,7 @@ no C toolchain, and no libusb dependency, on any platform**:
 ## Installation
 
 ```bash
-go get github.com/kevmo314/go-usb
+go get github.com/tridentsx/go-usb
 ```
 
 ## Requirements
@@ -65,7 +67,7 @@ import (
     "fmt"
     "log"
 
-    usb "github.com/kevmo314/go-usb"
+    usb "github.com/tridentsx/go-usb"
 )
 
 func main() {
