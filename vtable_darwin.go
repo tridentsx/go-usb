@@ -51,10 +51,16 @@ const (
 	kIOReturnNotPermitted    = -0x1FFFFD3F // 0xe00002c1
 	kIOReturnUnsupported     = -0x1FFFFD39 // 0xe00002c7
 
-	// kIOUSBTransactionTimeout is IOUSBFamily's kIOUSBTransactionTimeout:
-	// int32(-536870899) (0xe000000d). ReadPipeTO and WritePipeTO return this
-	// when the transfer times out.
-	kIOUSBTransactionTimeout = -536870899
+	// kIOUSBTransactionTimeout is IOUSBFamily's kIOUSBTransactionTimeout,
+	// iokit_usb_err(0x51): int32(-536854447) (0xe0004051). ReadPipeTO and
+	// WritePipeTO return this when the transfer times out. Confirmed
+	// against real IOUSBFamily source
+	// (github.com/opensource-apple/IOUSBFamily) and libusb's darwin
+	// backend, which maps this exact code to LIBUSB_ERROR_TIMEOUT --
+	// -536870899 (0xe000000d) here previously was simply wrong, found by
+	// hitting a real transaction timeout on real hardware and it not
+	// being recognized as one.
+	kIOUSBTransactionTimeout = -536854447
 )
 
 // vtableOf returns the function-pointer table a COM-style interface handle
