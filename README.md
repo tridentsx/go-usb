@@ -114,7 +114,7 @@ platform without the build failing on the others. Grouped by purpose:
 | Standard requests | `Status`, `GetStatus`, `SetFeature`, `ClearFeature`, `SynchFrame` |
 | Capabilities and speed | `Speed`, `GetSpeed`, `Capabilities`, `GetCapabilities` |
 | Bulk streams (USB 3.0) | `AllocStreams`, `FreeStreams` |
-| Transfer objects | `SubmitTransfer`, `CancelTransfer`, `ReapTransfer`, `NewIsochronousTransfer` |
+| Transfer objects | `NewIsochronousTransfer`; `SubmitTransfer`, `CancelTransfer`, `ReapTransfer` are **deprecated** (see below) |
 
 Package-level functions outside the per-handle contract: `DeviceList`,
 `OpenDevice`, `OpenDeviceWithPath`, `IsValidDevicePath`, and
@@ -217,23 +217,85 @@ n, err := handle.InterruptTransfer(
 
 ### Asynchronous Transfer
 
+`AsyncTransfer` is the real, working async API on every platform — unlike
+the older `Transfer`/`SubmitTransfer`/`ReapTransfer` family, which is
+deprecated (see the Platform Support Matrix below for why: it reports
+`ErrNotSupported` on Linux and Windows, and is only partially real on
+macOS).
+
 ```go
-// Create a transfer object
-transfer := usb.NewTransfer(handle, 0x81, usb.TransferTypeInterrupt, 64)
+// Create an async transfer bound to an interrupt IN endpoint.
+transfer, err := handle.NewInterruptTransfer(0x81, 64)
+if err != nil {
+    log.Fatal(err)
+}
 
-// Set callback
-transfer.SetCallback(func(t *usb.Transfer) {
-    if t.Status() == usb.TransferCompleted {
-        data := t.Buffer()
-        fmt.Printf("Received %d bytes\n", t.ActualLength())
-    }
+if err := transfer.Submit(); err != nil {
+    log.Fatal(err)
+}
+
+// WaitWithTimeout blocks until the transfer completes or the timeout
+// elapses; Status/ActualLength/Buffer then describe what happened.
+if err := transfer.WaitWithTimeout(time.Second); err != nil {
+    log.Fatal(err)
+}
+if transfer.Status() == usb.TransferCompleted {
+    fmt.Printf("Received %d bytes: %x\n", transfer.ActualLength(), transfer.Buffer())
+}
+```
+
+`NewBulkTransfer` and `NewControlTransfer` work the same way for those
+transfer types. `AsyncTransfer.SetCallback` is deliberately not shown
+above: it only exists on macOS today (`AsyncTransfer` embeds `*Transfer`
+there, promoting it; Linux and Windows' `AsyncTransfer` are separate
+structs that do not), so `Wait`/`WaitWithTimeout` is the only portable way
+to learn a transfer finished. See
+[`ExampleDeviceHandle_NewBulkTransfer`](example_test.go) for a runnable
+version.
+
+### Isochronous Transfer
+
+```go
+transfer := handle.NewIsochronousTransfer(endpoint, numPackets, packetSize)
+
+if err := transfer.Submit(); err != nil {
+    log.Fatal(err)
+}
+if err := transfer.Wait(); err != nil {
+    log.Fatal(err)
+}
+
+for i, pkt := range transfer.Packets() {
+    fmt.Printf("packet %d: %d bytes, status %d\n", i, pkt.ActualLength, pkt.Status)
+}
+```
+
+### Hotplug
+
+```go
+handle, err := usb.RegisterHotplugCallback(vendorID, productID, func(event usb.HotplugEvent, dev *usb.Device) {
+    fmt.Printf("%s: %04x:%04x\n", event, dev.Descriptor.VendorID, dev.Descriptor.ProductID)
 })
+if err != nil {
+    log.Fatal(err) // ErrNotSupported on a platform/backend that can't watch yet
+}
+defer handle.Deregister()
+```
 
-// Submit transfer
-err := handle.SubmitTransfer(transfer)
+### HID Reports (macOS and Windows)
 
-// Reap completed transfers
-completedTransfer, err := handle.ReapTransfer(time.Second)
+For test equipment that presents as a HID device rather than a
+vendor-specific one — see [Accessing HID devices](#accessing-hid-devices)
+below for what this can and cannot do, and why Linux uses a different
+(more capable) approach instead.
+
+```go
+if handle.IsHID() {
+    var report [8]byte
+    if _, err := handle.GetFeatureReport(0, report[:]); err != nil {
+        log.Fatal(err)
+    }
+}
 ```
 
 ## Permissions
@@ -305,7 +367,7 @@ or the underlying mechanism is worth knowing about.
 | Control / bulk / interrupt transfers | yes | yes | yes |
 | Isochronous transfers | yes (usbfs URBs) | yes (IOKit) | yes (WinUSB isoch API) |
 | Asynchronous transfers | yes (`AsyncTransfer`) | yes (`AsyncTransfer`) | yes (`AsyncTransfer`, overlapped I/O) |
-| `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` | `ErrNotSupported`, use `AsyncTransfer` | yes | `ErrNotSupported`, use `AsyncTransfer` |
+| `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` (**deprecated**) | `ErrNotSupported` | blocks synchronously; `ReapTransfer` unconditionally unimplemented | `ErrNotSupported` |
 | Bulk streams (`AllocStreams`) | yes | not implemented — possible, see below | not implemented — possible, see below |
 | `DetachKernelDriver` / `AttachKernelDriver` | yes (`USBDEVFS_DISCONNECT`) | `ErrNotSupported` | `ErrNotSupported` |
 | HID-class devices | raw, after detaching `usbhid` (most capable: vendor control too) | report-level only via `IOHIDDevice`, no vendor control | report-level only via `hid.dll`, no vendor control |

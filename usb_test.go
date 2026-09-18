@@ -1,7 +1,6 @@
 package usb
 
 import (
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -253,14 +252,8 @@ func BenchmarkDeviceList(b *testing.B) {
 	}
 }
 
-func ExampleDeviceList() {
-	devices, err := DeviceList()
-	if err != nil {
-		panic(err)
-	}
-
-	for _, dev := range devices {
-		fmt.Printf("Device: VID=0x%04x PID=0x%04x\n",
-			dev.Descriptor.VendorID, dev.Descriptor.ProductID)
-	}
-}
+// ExampleDeviceList (the public, documented version, shown with the
+// package-qualified usb. prefix a real caller would use) lives in
+// example_test.go now, in the usb_test external test package -- the more
+// idiomatic form for a public API's own examples, matching how the Go
+// standard library documents its own packages.
