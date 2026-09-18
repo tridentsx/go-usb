@@ -306,9 +306,9 @@ or the underlying mechanism is worth knowing about.
 | Isochronous transfers | yes (usbfs URBs) | yes (IOKit) | yes (WinUSB isoch API) |
 | Asynchronous transfers | yes (`AsyncTransfer`) | yes (`AsyncTransfer`) | yes (`AsyncTransfer`, overlapped I/O) |
 | `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` | `ErrNotSupported`, use `AsyncTransfer` | yes | `ErrNotSupported`, use `AsyncTransfer` |
-| Bulk streams (`AllocStreams`) | yes | `ErrNotSupported` | `ErrNotSupported` |
+| Bulk streams (`AllocStreams`) | yes | not implemented — possible, see below | not implemented — possible, see below |
 | `DetachKernelDriver` / `AttachKernelDriver` | yes (`USBDEVFS_DISCONNECT`) | `ErrNotSupported` | `ErrNotSupported` |
-| HID-class devices | raw, after detaching `usbhid` | not yet | report-level via `hid.dll` |
+| HID-class devices | raw, after detaching `usbhid` (most capable: vendor control too) | not implemented — possible, see below | report-level only via `hid.dll`, no vendor control |
 | `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
 | Hotplug notifications (`RegisterHotplugCallback`) | not yet | yes (IOKit, verified against a real unplug/replug) | yes (`RegisterDeviceNotification`/`WM_DEVICECHANGE`) |
@@ -352,12 +352,42 @@ hardware — see the [go-usb-jig](https://github.com/tridentsx/go-usb-jig)
 companion repo's hardware-gated test suite for the bulk/interrupt/
 isochronous/control/stall coverage specifically.
 
+### Bulk streams are Linux-only for now
+
+USB 3.0 bulk streams exist almost exclusively for USB Attached SCSI (UASP)
+mass-storage devices to queue multiple SCSI commands on one bulk endpoint —
+the USB analogue of SATA NCQ. General test/measurement gear essentially never
+needs this, and it doesn't apply to full/high-speed-only devices at all (no
+USB 3.0 link, no streams), which is why it hasn't come up against the
+[go-usb-jig](https://github.com/tridentsx/go-usb-jig) board.
+
+It is not fundamentally impossible on macOS or Windows, just not reachable
+through the specific APIs this library's backends use today:
+
+- **macOS**: the classic `IOUSBLib` API (`IOUSBDeviceInterface`/
+  `IOUSBInterfaceInterface`) this backend targets has no streams support. Apple's
+  newer `IOUSBHostFamily` API does, via `IOUSBHostPipe.enableStreams()`/
+  `copyStream()` — a different, separate IOKit framework, not an extension of
+  the current one.
+- **Windows**: WinUSB itself explicitly does not support per-stream I/O on a
+  SuperSpeed bulk endpoint (Microsoft's own documentation: "you can only
+  perform transfers to the endpoint as a whole"). The underlying Windows USB
+  driver stack does support up to 255 streams, but only through separate WDK
+  device driver interfaces reachable from a KMDF/UMDF client driver, not
+  through WinUSB's user-mode API.
+
+Both would be a real, separate implementation effort per platform, not a small
+addition to the existing backends.
+
 ### Accessing HID devices
 
 A lot of test equipment presents itself as a standard HID device so that it
 needs no driver installation: some report measurements directly in input
-reports, others tunnel a serial protocol over reports. Support differs by
-platform.
+reports, others tunnel a serial protocol over reports. There is no parity
+between platforms here — Linux is the most capable (raw access, including
+vendor control requests, once `usbhid` is detached), Windows is report-level
+only (no vendor control, no bulk, no isochronous), and macOS cannot open HID
+devices at all yet.
 
 On **Windows** such a device is opened through `hid.dll` automatically. `Open`
 tries WinUSB first and falls back to the HID transport, so no caller change is
@@ -389,7 +419,10 @@ raw transfers, which needs root or a udev rule. That is more capable than the
 Windows HID path, since it carries vendor control requests too.
 
 On **macOS** HID devices enumerate but cannot currently be opened: `IOHIDFamily`
-owns them and the backend has no IOHIDManager transport yet.
+owns them and the backend has no IOHIDManager transport yet. Not fundamentally
+impossible — `IOHIDManager`/`IOHIDDevice` in `IOKit.framework` is the real API
+for it — just not implemented, the same "not implemented, not impossible"
+situation as bulk streams above.
 
 ### `Device.Path` is platform-specific
 
@@ -421,8 +454,11 @@ need to detect changes until their native mechanisms (netlink/udev,
 - Requires appropriate permissions for USB device access
 - Hotplug notifications work on macOS and Windows; Linux is tracked but not
   implemented yet (see the platform table above)
-- Bulk streams (`AllocStreams`) and `Capabilities` are Linux-only; macOS and
-  Windows report `ErrNotSupported`
+- Bulk streams (`AllocStreams`) and `Capabilities` are Linux-only for now.
+  `Capabilities` is a usbfs-specific concept, but bulk streams are not
+  fundamentally impossible on macOS/Windows — see "Bulk streams are
+  Linux-only for now" above — just not implemented against the newer,
+  separate APIs (`IOUSBHostFamily`, WDK stream DDIs) each would need
 
 ## Resources
 
