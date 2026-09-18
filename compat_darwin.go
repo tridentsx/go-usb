@@ -300,36 +300,45 @@ func (h *DeviceHandle) newAsyncTransfer(endpoint uint8, transferType TransferTyp
 
 // Wait blocks until the transfer completes.
 func (t *AsyncTransfer) Wait() error {
-	return t.waitUntil(time.Time{})
+	if t.done == nil {
+		return ErrInvalidParameter
+	}
+	<-t.done
+	return nil
 }
 
 // WaitWithTimeout blocks until the transfer completes or the timeout elapses,
 // in which case it returns ErrTimeout.
 func (t *AsyncTransfer) WaitWithTimeout(timeout time.Duration) error {
-	return t.waitUntil(time.Now().Add(timeout))
+	if t.done == nil {
+		return ErrInvalidParameter
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-t.done:
+		return nil
+	case <-timer.C:
+		return ErrTimeout
+	}
 }
 
-// waitUntil polls for completion. A zero deadline waits indefinitely.
+// markCompletedLocked records that the transfer has finished and releases any
+// waiters. The caller must hold t.mutex.
 //
-// IOKit signals completion from a CFRunLoop callback, so this cannot block on
-// the submitting goroutine; polling keeps the run loop free to dispatch.
-func (t *AsyncTransfer) waitUntil(deadline time.Time) error {
-	const pollInterval = 10 * time.Millisecond
-
-	for {
-		t.mutex.Lock()
-		completed := t.completed
-		t.mutex.Unlock()
-
-		if completed {
-			return nil
-		}
-
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			return ErrTimeout
-		}
-
-		time.Sleep(pollInterval)
+// IOKit signals completion from a CFRunLoop callback, so waiters cannot hold the
+// mutex while blocking. Closing a channel lets them wait without polling and
+// without a goroutine per waiter, and closing it under the mutex on the
+// false-to-true transition guarantees it happens exactly once.
+func (t *AsyncTransfer) markCompletedLocked() {
+	if t.completed {
+		return
+	}
+	t.completed = true
+	if t.done != nil {
+		close(t.done)
 	}
 }
 

@@ -1,69 +1,49 @@
+// Isochronous transfers via IOKit, without cgo.
+//
+// Isochronous I/O is inherently asynchronous -- ReadIsochPipeAsync and
+// WriteIsochPipeAsync submit a run of frames against a future bus frame number
+// and return immediately, long before the data has actually moved -- so this
+// is the first real asynchronous transfer path in the purego backend, and the
+// first place the buffer-lifetime concern flagged when interface claiming
+// landed is actually load-bearing.
+//
+// That concern, precisely: between a submit call returning and its completion
+// callback firing, the transfer's buffer and frame list must stay reachable,
+// or Go's garbage collector is free to reclaim them while IOKit still holds
+// raw pointers to them. Go's GC does not move heap objects, so a stable
+// address is not the issue; going out of scope is. Each IOUSBInterfaceInterface
+// keeps a pending map from a submitted frame list's address to its
+// *IsochronousTransfer for exactly this reason -- as long as that map holds
+// the transfer, the transfer holds its own buffer and frame list, and the map
+// itself is reachable from the open interface for as long as it is open. No
+// runtime.Pinner or cgo pointer-passing rule is needed; a live Go reference is
+// sufficient, and the map already is one.
+//
+// The completion callback itself is shared across every transfer submitted on
+// an interface, for a related reason: purego.NewCallback's allocation is
+// permanent for the life of the process ("any memory allocated for these
+// callbacks is never released"), and there is a hard ceiling on how many
+// exist at once. A callback per Submit call would exhaust that ceiling under
+// any real streaming workload (a UVC camera submits dozens of these a
+// second). IOKit documents arg0 of the IOAsyncCallback1 as the frameList
+// pointer the call was given, which is exactly the correlation key the shared
+// callback needs to find its way back to the right transfer in the pending
+// map.
+//
+// See issue #14.
+
 package usb
-
-/*
-#cgo LDFLAGS: -framework IOKit -framework CoreFoundation
-#include <IOKit/IOKitLib.h>
-#include <IOKit/usb/IOUSBLib.h>
-#include <CoreFoundation/CoreFoundation.h>
-
-// Isochronous transfer support
-typedef struct {
-    IOUSBIsocFrame *frames;
-    UInt32 numFrames;
-    void *buffer;
-    UInt32 bufferSize;
-    void *userData;
-} IsocTransferContext;
-
-// Read isochronous data
-int ReadIsocPipe(IOUSBInterfaceInterface300 **interfaceInterface,
-                UInt8 pipeRef,
-                void *buf,
-                UInt64 frameStart,
-                UInt32 numFrames,
-                IOUSBIsocFrame *frameList) {
-    return (*interfaceInterface)->ReadIsochPipeAsync(interfaceInterface,
-                                                     pipeRef,
-                                                     buf,
-                                                     frameStart,
-                                                     numFrames,
-                                                     frameList,
-                                                     NULL, // callback
-                                                     NULL); // refCon
-}
-
-// Write isochronous data
-int WriteIsocPipe(IOUSBInterfaceInterface300 **interfaceInterface,
-                 UInt8 pipeRef,
-                 void *buf,
-                 UInt64 frameStart,
-                 UInt32 numFrames,
-                 IOUSBIsocFrame *frameList) {
-    return (*interfaceInterface)->WriteIsochPipeAsync(interfaceInterface,
-                                                      pipeRef,
-                                                      buf,
-                                                      frameStart,
-                                                      numFrames,
-                                                      frameList,
-                                                      NULL, // callback
-                                                      NULL); // refCon
-}
-
-// Get bus frame number
-int GetBusFrameNumber(IOUSBInterfaceInterface300 **interfaceInterface, UInt64 *frame, AbsoluteTime *atTime) {
-    return (*interfaceInterface)->GetBusFrameNumber(interfaceInterface, frame, atTime);
-}
-
-*/
-import "C"
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
-// IsochronousTransfer represents an isochronous USB transfer
+// IsochronousTransfer represents an isochronous USB transfer.
 type IsochronousTransfer struct {
 	handle         *DeviceHandle
 	endpoint       uint8
@@ -72,7 +52,6 @@ type IsochronousTransfer struct {
 	buffer         []byte
 	status         TransferStatus
 	actualLength   int
-	frameList      []C.IOUSBIsocFrame
 	callback       func(*IsochronousTransfer)
 	userData       interface{}
 	submitted      bool
@@ -80,85 +59,56 @@ type IsochronousTransfer struct {
 	mutex          sync.Mutex
 	packetLengths  []int
 	packetStatuses []int
+
+	intf      *IOUSBInterfaceInterface
+	frameList []ioUSBIsocFrame
+	done      chan struct{}
 }
 
 // NewIsochronousTransfer creates a new isochronous transfer.
 //
-// Deprecated: use DeviceHandle.NewIsochronousTransfer, which is the form used
-// on every platform and reports errors.
+// Deprecated: use DeviceHandle.NewIsochronousTransfer, which is the form used on
+// every platform and reports errors.
 func NewIsochronousTransfer(handle *DeviceHandle, endpoint uint8, numPackets int, packetSize int) *IsochronousTransfer {
-	totalSize := numPackets * packetSize
-	frameList := make([]C.IOUSBIsocFrame, numPackets)
-
-	// Initialize frame list
-	for i := range frameList {
-		frameList[i].frStatus = C.kIOReturnSuccess
-		frameList[i].frReqCount = C.UInt16(packetSize)
-		frameList[i].frActCount = 0
-	}
-
 	return &IsochronousTransfer{
 		handle:         handle,
 		endpoint:       endpoint,
 		packetSize:     packetSize,
 		numPackets:     numPackets,
-		buffer:         make([]byte, totalSize),
-		frameList:      frameList,
+		buffer:         make([]byte, numPackets*packetSize),
 		packetLengths:  make([]int, numPackets),
 		packetStatuses: make([]int, numPackets),
 		status:         TransferError,
 	}
 }
 
-// SetCallback sets the transfer callback
+// SetCallback sets the completion callback.
 func (t *IsochronousTransfer) SetCallback(callback func(*IsochronousTransfer)) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	t.callback = callback
 }
 
-// SetUserData sets user data for the transfer
-func (t *IsochronousTransfer) SetUserData(data interface{}) {
-	t.userData = data
-}
+// SetUserData attaches caller data to the transfer.
+func (t *IsochronousTransfer) SetUserData(data interface{}) { t.userData = data }
 
-// GetUserData gets the user data
-func (t *IsochronousTransfer) GetUserData() interface{} {
-	return t.userData
-}
+// GetUserData returns the data attached with SetUserData.
+func (t *IsochronousTransfer) GetUserData() interface{} { return t.userData }
 
-// SetPacketLength sets the length for a specific packet
+// SetPacketLength sets the requested length of one packet.
 func (t *IsochronousTransfer) SetPacketLength(packet int, length int) error {
 	if packet < 0 || packet >= t.numPackets {
-		return fmt.Errorf("packet index %d out of range", packet)
+		return ErrInvalidParameter
 	}
-
-	t.frameList[packet].frReqCount = C.UInt16(length)
+	if length < 0 || length > t.packetSize {
+		return ErrInvalidParameter
+	}
 	t.packetLengths[packet] = length
 	return nil
 }
 
-// GetPacketData returns the data for a specific packet.
-//
-// Deprecated: use IsoPacketBuffer.
-func (t *IsochronousTransfer) GetPacketData(packet int) ([]byte, error) {
-	if packet < 0 || packet >= t.numPackets {
-		return nil, fmt.Errorf("packet index %d out of range", packet)
-	}
-
-	offset := packet * t.packetSize
-	length := t.packetLengths[packet]
-	if length == 0 {
-		length = t.packetSize
-	}
-
-	end := offset + length
-	if end > len(t.buffer) {
-		end = len(t.buffer)
-	}
-
-	return t.buffer[offset:end], nil
-}
-
-// Submit submits the isochronous transfer
+// Submit queues the transfer against a near-future bus frame and returns
+// immediately; the transfer is not complete when this returns; call Wait.
 func (t *IsochronousTransfer) Submit() error {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -166,137 +116,136 @@ func (t *IsochronousTransfer) Submit() error {
 	if t.submitted {
 		return fmt.Errorf("transfer already submitted")
 	}
-
-	if t.handle.closed {
-		return fmt.Errorf("device is closed")
+	if t.handle == nil || t.handle.closed {
+		return ErrDeviceNotFound
 	}
 
-	// Find the interface for this endpoint
+	// Endpoint is not tracked to a specific claimed interface, the same
+	// simplification ClearHalt and bulkTransfer already make.
 	var intf *IOUSBInterfaceInterface
 	for _, i := range t.handle.interfaces {
 		intf = i
 		break
 	}
-
 	if intf == nil {
 		return fmt.Errorf("no interface claimed for endpoint %02x", t.endpoint)
 	}
 
-	// Get current bus frame number
-	var frameNumber C.UInt64
-	var atTime C.AbsoluteTime
-	ret := C.GetBusFrameNumber(intf.ptr, &frameNumber, &atTime)
-	if ret != kIOReturnSuccess {
-		return fmt.Errorf("failed to get bus frame number: 0x%x", ret)
+	if err := intf.ensureAsyncPump(); err != nil {
+		return fmt.Errorf("starting async pump: %w", err)
 	}
 
-	// Start a few frames in the future
-	startFrame := frameNumber + 10
+	frame, err := intf.GetBusFrameNumber()
+	if err != nil {
+		return fmt.Errorf("GetBusFrameNumber: %w", err)
+	}
+	// Far enough in the future that building the frame list and making the
+	// actual submit call doesn't let the bus schedule catch up first. The
+	// cgo backend used +10, untested against real hardware; against real
+	// hardware that was measured too tight and returned kIOReturnIsoTooOld
+	// ("isochronous I/O request for distant past").
+	startFrame := frame + 100
 
-	pipeRef := t.endpoint & 0x0F
+	t.frameList = make([]ioUSBIsocFrame, t.numPackets)
+	for i := range t.frameList {
+		length := t.packetLengths[i]
+		if length == 0 {
+			length = t.packetSize
+		}
+		t.frameList[i].frReqCount = uint16(length)
+	}
+	t.done = make(chan struct{})
 
-	// Submit the isochronous transfer
+	key := isocFrameListKey(t.frameList)
+	intf.pendingMu.Lock()
+	intf.pending[key] = t
+	intf.pendingMu.Unlock()
+
+	pipeRef, err := intf.PipeRefForEndpoint(t.endpoint)
+	if err != nil {
+		intf.pendingMu.Lock()
+		delete(intf.pending, key)
+		intf.pendingMu.Unlock()
+		return err
+	}
+
+	var submitErr error
 	if t.endpoint&0x80 != 0 {
-		// IN transfer
-		ret = C.ReadIsocPipe(intf.ptr,
-			C.UInt8(pipeRef),
-			unsafe.Pointer(&t.buffer[0]),
-			C.UInt64(startFrame),
-			C.UInt32(t.numPackets),
-			&t.frameList[0])
+		submitErr = intf.readIsochPipeAsync(pipeRef, t.buffer, startFrame, uint32(t.numPackets), &t.frameList[0], intf.callback)
 	} else {
-		// OUT transfer
-		ret = C.WriteIsocPipe(intf.ptr,
-			C.UInt8(pipeRef),
-			unsafe.Pointer(&t.buffer[0]),
-			C.UInt64(startFrame),
-			C.UInt32(t.numPackets),
-			&t.frameList[0])
+		submitErr = intf.writeIsochPipeAsync(pipeRef, t.buffer, startFrame, uint32(t.numPackets), &t.frameList[0], intf.callback)
+	}
+	if submitErr != nil {
+		intf.pendingMu.Lock()
+		delete(intf.pending, key)
+		intf.pendingMu.Unlock()
+		return fmt.Errorf("submitting isochronous pipe %#x: %w", t.endpoint, submitErr)
 	}
 
-	if ret != kIOReturnSuccess {
-		return fmt.Errorf("isochronous transfer failed: 0x%x", ret)
-	}
-
+	t.intf = intf
 	t.submitted = true
-
-	// Since we're using sync API for now, mark as completed
-	t.processCompletion()
-
 	return nil
 }
 
-// processCompletion processes the completion of the transfer
-func (t *IsochronousTransfer) processCompletion() {
-	t.actualLength = 0
-	allSuccess := true
-
-	// Process frame results
-	for i, frame := range t.frameList {
-		t.packetStatuses[i] = int(frame.frStatus)
-		actualCount := int(frame.frActCount)
-		t.packetLengths[i] = actualCount
-		t.actualLength += actualCount
-
-		if frame.frStatus != C.kIOReturnSuccess {
-			allSuccess = false
-		}
-	}
-
-	if allSuccess {
-		t.status = TransferCompleted
-	} else {
-		t.status = TransferError
-	}
-
-	t.completed = true
-
-	if t.callback != nil {
-		t.callback(t)
-	}
-}
-
-// Cancel cancels the isochronous transfer
+// Cancel aborts the pipe this transfer is on, which is the only cancellation
+// IOKit offers -- there is no way to cancel one specific in-flight request
+// without affecting others queued on the same pipe. The aborted transfer
+// still completes normally through the callback, now with an error status,
+// so Cancel does not itself mark the transfer completed or close done.
 func (t *IsochronousTransfer) Cancel() error {
 	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
 	if !t.submitted {
+		t.mutex.Unlock()
 		return fmt.Errorf("transfer not submitted")
 	}
-
 	if t.completed {
+		t.mutex.Unlock()
 		return nil
 	}
+	intf := t.intf
+	endpoint := t.endpoint
+	t.mutex.Unlock()
 
-	// Cancellation would require async API support
-	t.status = TransferCancelled
-	t.completed = true
-
-	return nil
+	pipeRef, err := intf.PipeRefForEndpoint(endpoint)
+	if err != nil {
+		return err
+	}
+	return intf.AbortPipe(pipeRef)
 }
 
-// Wait waits for the transfer to complete
+// Wait blocks until the transfer completes.
 func (t *IsochronousTransfer) Wait() error {
-	// Since we're using sync API, transfer is already complete
 	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
 	if !t.submitted {
+		t.mutex.Unlock()
 		return fmt.Errorf("transfer not submitted")
 	}
+	done := t.done
+	t.mutex.Unlock()
 
+	<-done
 	return nil
 }
 
-// Status returns the transfer status
+// Status returns the transfer status.
 func (t *IsochronousTransfer) Status() TransferStatus {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	return t.status
 }
 
-// ActualLength returns the total actual bytes transferred
+// ActualLength returns the total bytes transferred.
 func (t *IsochronousTransfer) ActualLength() int {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	return t.actualLength
+}
+
+// GetPacketData returns the data for a specific packet.
+//
+// Deprecated: use IsoPacketBuffer.
+func (t *IsochronousTransfer) GetPacketData(packet int) ([]byte, error) {
+	return t.IsoPacketBuffer(packet)
 }
 
 // GetPacketStatus returns the status of a specific packet.
@@ -304,8 +253,10 @@ func (t *IsochronousTransfer) ActualLength() int {
 // Deprecated: use Packets and read IsoPacketDescriptor.Status.
 func (t *IsochronousTransfer) GetPacketStatus(packet int) (int, error) {
 	if packet < 0 || packet >= t.numPackets {
-		return 0, fmt.Errorf("packet index %d out of range", packet)
+		return 0, ErrInvalidParameter
 	}
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	return t.packetStatuses[packet], nil
 }
 
@@ -314,28 +265,203 @@ func (t *IsochronousTransfer) GetPacketStatus(packet int) (int, error) {
 // Deprecated: use Packets and read IsoPacketDescriptor.ActualLength.
 func (t *IsochronousTransfer) GetPacketActualLength(packet int) (int, error) {
 	if packet < 0 || packet >= t.numPackets {
-		return 0, fmt.Errorf("packet index %d out of range", packet)
+		return 0, ErrInvalidParameter
 	}
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	return t.packetLengths[packet], nil
 }
 
-// IsochronousTransferIn performs a synchronous isochronous IN transfer
+// IsochronousTransferIn creates an isochronous transfer for reading and
+// submits it.
 func (h *DeviceHandle) IsochronousTransferIn(endpoint uint8, numPackets, packetSize int) (*IsochronousTransfer, error) {
-	transfer := NewIsochronousTransfer(h, endpoint|0x80, numPackets, packetSize)
-	err := transfer.Submit()
-	if err != nil {
+	t := NewIsochronousTransfer(h, endpoint|0x80, numPackets, packetSize)
+	if err := t.Submit(); err != nil {
 		return nil, err
 	}
-	return transfer, nil
+	return t, nil
 }
 
-// IsochronousTransferOut performs a synchronous isochronous OUT transfer
+// IsochronousTransferOut creates an isochronous transfer for writing and
+// submits it.
 func (h *DeviceHandle) IsochronousTransferOut(endpoint uint8, data []byte, numPackets, packetSize int) (*IsochronousTransfer, error) {
-	transfer := NewIsochronousTransfer(h, endpoint&0x7F, numPackets, packetSize)
-	copy(transfer.buffer, data)
-	err := transfer.Submit()
-	if err != nil {
+	t := NewIsochronousTransfer(h, endpoint&0x7F, numPackets, packetSize)
+	copy(t.buffer, data)
+	if err := t.Submit(); err != nil {
 		return nil, err
 	}
-	return transfer, nil
+	return t, nil
+}
+
+// completeAsync records one completion, delivered by the interface's shared
+// callback trampoline, and wakes anything blocked in Wait.
+func (t *IsochronousTransfer) completeAsync(result int32) {
+	t.mutex.Lock()
+
+	t.actualLength = 0
+	allSuccess := result == kernSuccess
+	for i := range t.frameList {
+		t.packetStatuses[i] = int(t.frameList[i].frStatus)
+		n := int(t.frameList[i].frActCount)
+		t.packetLengths[i] = n
+		t.actualLength += n
+		if t.frameList[i].frStatus != kernSuccess {
+			allSuccess = false
+		}
+	}
+	if allSuccess {
+		t.status = TransferCompleted
+	} else {
+		t.status = TransferError
+	}
+	t.completed = true
+	callback := t.callback
+	close(t.done)
+
+	t.mutex.Unlock()
+
+	if callback != nil {
+		callback(t)
+	}
+}
+
+// isocFrameListKey is the pending-map key for a transfer's frame list: the
+// address of its first element, which is exactly what IOKit hands back as
+// arg0 on completion.
+func isocFrameListKey(frameList []ioUSBIsocFrame) uintptr {
+	if len(frameList) == 0 {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(&frameList[0]))
+}
+
+// --- per-interface async pump -------------------------------------------------
+
+// ensureAsyncPump starts the interface's async event pump on first use. It is
+// idempotent and safe to call from multiple goroutines submitting transfers
+// concurrently on the same interface.
+func (i *IOUSBInterfaceInterface) ensureAsyncPump() error {
+	i.asyncMu.Lock()
+	if i.asyncStarted {
+		err := i.asyncErr
+		i.asyncMu.Unlock()
+		return err
+	}
+	i.asyncStarted = true
+	i.asyncMu.Unlock()
+
+	k, err := loadIOKit()
+	if err != nil {
+		i.asyncMu.Lock()
+		i.asyncErr = err
+		i.asyncMu.Unlock()
+		return err
+	}
+
+	source, err := i.CreateInterfaceAsyncEventSource()
+	if err != nil {
+		i.asyncMu.Lock()
+		i.asyncErr = err
+		i.asyncMu.Unlock()
+		return err
+	}
+
+	// See the note on kCFRunLoopDefaultMode in hotplug_darwin.go: an
+	// equal CFString built locally works exactly like the real constant would,
+	// since CFRunLoop matches modes by CFEqual, and avoids dereferencing a
+	// foreign global's address through Dlsym.
+	mode := k.cfStringRef("kCFRunLoopDefaultMode")
+	if mode == 0 {
+		i.asyncMu.Lock()
+		i.asyncErr = ErrOther
+		i.asyncMu.Unlock()
+		return ErrOther
+	}
+
+	i.pending = make(map[uintptr]*IsochronousTransfer)
+	i.callback = purego.NewCallback(func(refCon uintptr, result int32, arg0 uintptr) {
+		i.pendingMu.Lock()
+		t, ok := i.pending[arg0]
+		if ok {
+			delete(i.pending, arg0)
+		}
+		i.pendingMu.Unlock()
+		if ok {
+			t.completeAsync(result)
+		}
+	})
+
+	// Bulk/interrupt async shares this same pump and run loop, but needs its
+	// own trampoline: see the field comments on bulkCallback/pendingBulk.
+	i.pendingBulk = make(map[uintptr]*AsyncTransfer)
+	i.bulkCallback = purego.NewCallback(func(refCon uintptr, result int32, arg0 uintptr) {
+		i.pendingBulkMu.Lock()
+		t, ok := i.pendingBulk[refCon]
+		if ok {
+			delete(i.pendingBulk, refCon)
+		}
+		i.pendingBulkMu.Unlock()
+		if ok {
+			t.completeAsync(result, uint32(arg0))
+		}
+	})
+
+	i.asyncReady = make(chan struct{})
+	i.asyncDone = make(chan struct{})
+	i.asyncMode = mode
+
+	go func() {
+		runtime.LockOSThread()
+		// Deliberately never unlocked; see the identical note in
+		// hotplug_darwin.go's pump goroutine.
+
+		rl := hotplug.CFRunLoopGetCurrent()
+		hotplug.CFRunLoopAddSource(rl, source, mode)
+
+		i.asyncMu.Lock()
+		i.runLoop = rl
+		i.asyncMu.Unlock()
+		close(i.asyncReady)
+
+		for {
+			i.asyncMu.Lock()
+			stopped := i.asyncStopped
+			i.asyncMu.Unlock()
+			if stopped {
+				break
+			}
+			hotplug.CFRunLoopRunInMode(mode, 3600, true)
+		}
+
+		k.CFRelease(mode)
+		close(i.asyncDone)
+	}()
+
+	return nil
+}
+
+// stopAsyncPump stops the pump started by ensureAsyncPump, if one was, and
+// blocks until it has exited. Called from release, so it runs whether the
+// interface is released explicitly or as part of closing the device handle.
+func (i *IOUSBInterfaceInterface) stopAsyncPump() {
+	i.asyncMu.Lock()
+	if !i.asyncStarted || i.asyncStopped {
+		i.asyncMu.Unlock()
+		return
+	}
+	i.asyncStopped = true
+	ready := i.asyncReady
+	i.asyncMu.Unlock()
+
+	if ready == nil {
+		return
+	}
+	<-ready
+	i.asyncMu.Lock()
+	rl := i.runLoop
+	i.asyncMu.Unlock()
+	if rl != 0 {
+		hotplug.CFRunLoopStop(rl)
+	}
+	<-i.asyncDone
 }

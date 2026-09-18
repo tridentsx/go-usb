@@ -1,12 +1,39 @@
 # github.com/kevmo314/go-usb
 
-A cross-platform Go library for USB device communication, providing a libusb-like interface. On Linux, it uses the kernel's usbfs interface directly. On macOS, it uses the native IOKit framework.
+A cross-platform Go library for USB device communication, providing a
+libusb-like interface, without cgo and without libusb.
+
+## Goal
+
+One API, `import "github.com/kevmo314/go-usb"` and nothing else, that talks
+to real USB hardware on Linux, macOS and Windows through each OS's native
+interface — usbfs, IOKit and WinUSB/SetupAPI respectively — with **no cgo,
+no C toolchain, and no libusb dependency, on any platform**:
+
+- **Pure Go everywhere.** Linux and Windows always were; macOS reaches IOKit
+  through [purego](https://github.com/ebitengine/purego)'s
+  `dlopen`/`dlsym`/`SyscallN` rather than cgo (see
+  [#14](https://github.com/kevmo314/go-usb/issues/14)). `go build`, cross-
+  compilation and `GOOS=darwin go build` from a Linux CI runner all work with
+  no C compiler installed, ever.
+- **One contract, enforced at compile time.** Every backend implements the
+  same `DeviceHandleInterface` (see [`api_contract.go`](api_contract.go)).
+  Adding a method to one platform without the others breaks the build
+  everywhere rather than shipping an API that only compiles on the
+  maintainer's laptop. Where a platform genuinely cannot perform an
+  operation, it returns `ErrNotSupported` — never a `nil` error pretending
+  the operation happened.
+- **Verified against real hardware, not just compiled.** Real USB devices,
+  not mocks: see the [go-usb-jig](https://github.com/tridentsx/go-usb-jig)
+  companion repo's hardware-gated test suite for the bulk/interrupt/
+  isochronous/control/stall coverage on macOS specifically, and the platform
+  table below for what else has been exercised on real hardware per
+  platform.
 
 ## Features
 
 - Cross-platform support (Linux, macOS and Windows)
-- Pure Go implementation on Linux (no libusb dependency)
-- Native IOKit integration on macOS
+- Pure Go implementation everywhere, including macOS (no libusb dependency, no C toolchain)
 - Device enumeration and management
 - Control, bulk, interrupt, and isochronous transfers
 - Synchronous and asynchronous transfer operations
@@ -24,7 +51,7 @@ go get github.com/kevmo314/go-usb
 ## Requirements
 
 - Linux, macOS or Windows operating system
-- Go 1.21 or higher
+- Go 1.25 or higher
 - Appropriate permissions to access USB devices:
   - Linux: Typically requires root or udev rules
   - macOS: May require entitlements or running with elevated privileges
@@ -65,6 +92,39 @@ func main() {
     // Perform operations with the device...
 }
 ```
+
+## API
+
+The full, canonical surface is `DeviceHandleInterface` in
+[`api_contract.go`](api_contract.go) — every backend implements it in full,
+asserted at compile time, so this list is never out of date on any one
+platform without the build failing on the others. Grouped by purpose:
+
+| Group | Methods |
+|---|---|
+| Lifecycle and identity | `Close`, `Device`, `Descriptor` |
+| Configuration | `SetConfiguration`, `GetConfiguration`, `Configuration` |
+| Interfaces and alt settings | `ClaimInterface`, `ReleaseInterface`, `SetAltSetting`, `SetInterfaceAltSetting`, `Interface` |
+| Endpoint and device state | `ClearHalt`, `ResetDevice`, `ResetEndpoint` |
+| Kernel driver interaction | `KernelDriverActive`, `DetachKernelDriver`, `AttachKernelDriver` |
+| Synchronous transfers | `ControlTransfer`, `BulkTransfer`, `BulkTransferWithOptions`, `InterruptTransfer`, `InterruptTransferWithRetry`, `IsochronousTransfer` |
+| Descriptors | `StringDescriptor`, `RawDescriptor`, `SetDescriptor`, `RawConfigDescriptor`, `ConfigDescriptorByValue`, `ReadConfigDescriptor`, `GetConfigDescriptor`, `GetActiveConfigDescriptor`, `GetDeviceDescriptor`, `GetBOSDescriptor`, `ReadBOSDescriptor`, `GetDeviceQualifierDescriptor`, `ReadDeviceQualifierDescriptor`, `USB20ExtensionDescriptor`, `SSUSBDeviceCapabilityDescriptor`, `SSEndpointCompanionDescriptor` |
+| Standard requests | `Status`, `GetStatus`, `SetFeature`, `ClearFeature`, `SynchFrame` |
+| Capabilities and speed | `Speed`, `GetSpeed`, `Capabilities`, `GetCapabilities` |
+| Bulk streams (USB 3.0) | `AllocStreams`, `FreeStreams` |
+| Transfer objects | `SubmitTransfer`, `CancelTransfer`, `ReapTransfer`, `NewIsochronousTransfer` |
+
+Package-level functions outside the per-handle contract: `DeviceList`,
+`OpenDevice`, `OpenDeviceWithPath`, `IsValidDevicePath`, and
+`RegisterHotplugCallback` for hotplug notifications (see the platform table
+below for where each of these is actually implemented versus a documented
+`ErrNotSupported`).
+
+A few genuinely platform-specific escape hatches are deliberately kept out
+of the portable contract rather than faked everywhere — see the note at the
+bottom of `api_contract.go` for the exact list (a Linux usbfs file
+descriptor, macOS's CFRunLoop-shaped async conveniences, Windows' WinUSB
+pipe-policy calls).
 
 ## Usage Examples
 
@@ -233,11 +293,9 @@ The repository includes several command-line tools and examples in the `cmd/` di
 
 ## Platform Support Matrix
 
-Every backend implements the same API. Where a platform cannot perform an
-operation it returns `ErrNotSupported` rather than a `nil` error, so a caller
-can always tell the difference between "this worked" and "this is impossible
-here". The contract is asserted at compile time in `api_contract.go`, so a
-method cannot be added to one platform without the others.
+See [API](#api) for what "the same API" means precisely. This table is
+where the platforms actually differ — where one returns `ErrNotSupported`,
+or the underlying mechanism is worth knowing about.
 
 | Capability | Linux | macOS | Windows |
 |---|---|---|---|
@@ -251,7 +309,7 @@ method cannot be added to one platform without the others.
 | HID-class devices | raw, after detaching `usbhid` | not yet | report-level via `hid.dll` |
 | `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
-| Hotplug notifications | no | no | no |
+| Hotplug notifications (`RegisterHotplugCallback`) | not yet | yes (IOKit, verified against a real unplug/replug) | not yet |
 
 ### Opening devices on Windows
 
@@ -272,6 +330,25 @@ For a composite device, `Device.Path` identifies the device while opening
 targets its WinUSB function interface. Only the first such function is used, so
 a device exposing several WinUSB functions is currently reachable through one of
 them.
+
+### The macOS backend is cgo-free
+
+macOS reaches IOKit through [purego](https://github.com/ebitengine/purego)'s
+`dlopen`/`dlsym`/`SyscallN`/`NewCallback` rather than cgo. `CGO_ENABLED=1` and
+`CGO_ENABLED=0` build the identical set of files — there is no second,
+cgo-based backend to choose between anymore (see #14: PRs #15-#22 built the
+purego backend up to parity, and #25 removed the cgo backend it replaced).
+
+This is why `GOOS=darwin CGO_ENABLED=0 go build ./...` works from Linux: the
+macOS code can be cross-compiled and type-checked from any platform, with no
+C toolchain needed anywhere, ever.
+
+Device enumeration, opening, claiming interfaces, control/bulk/interrupt/
+isochronous transfers (synchronous and asynchronous), hotplug and endpoint
+stall/clear-halt are all implemented and verified end to end against real
+hardware — see the [go-usb-jig](https://github.com/tridentsx/go-usb-jig)
+companion repo's hardware-gated test suite for the bulk/interrupt/
+isochronous/control/stall coverage specifically.
 
 ### Accessing HID devices
 
@@ -329,16 +406,19 @@ interface class GUID.
 
 Use `IsValidDevicePath` to check a path for the current platform.
 
-### No hotplug
+### Hotplug is macOS-only for now
 
-No backend implements hotplug notifications. Poll `DeviceList` if you need to
-detect changes.
+`RegisterHotplugCallback` is real on macOS — verified against a live
+unplug/replug of a real hub, see [#20](https://github.com/kevmo314/go-usb/pull/20).
+Linux and Windows report `ErrNotSupported`; poll `DeviceList` there if you
+need to detect changes until their native mechanisms (netlink/udev,
+`RegisterDeviceNotification`) land.
 
 ## Limitations
 
 - Requires appropriate permissions for USB device access
-- No hotplug support (can be implemented with platform-specific monitoring)
-- Async transfers on macOS require CFRunLoop integration
+- Hotplug notifications work on macOS; Linux and Windows are tracked but not
+  implemented yet (see the platform table above)
 - The Windows backend is newer than the Linux and macOS ones; isochronous and
   asynchronous transfers are not implemented there yet
 
