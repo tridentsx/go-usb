@@ -190,27 +190,32 @@ func (t *IsochronousTransfer) Packets() []IsoPacketDescriptor {
 }
 
 // IsoPacketBuffer returns the slice of Buffer belonging to packet packetIndex.
+//
+// The byte offset of each packet is computed from the fixed packet size
+// (total buffer / packet count) rather than from USBD_ISO_PACKET_DESCRIPTOR.Offset:
+// per Microsoft's own WinUsb_ReadIsochPipe/ReadIsochPipeAsap docs, the
+// IsoPacketDescriptors array is [out]-only and documented to receive just the
+// status and size of each packet after completion -- Offset is never
+// documented as being written back, so it cannot be trusted to locate a
+// packet's data. After a completed IN transfer p.Length contains the actual
+// bytes received.
 func (t *IsochronousTransfer) IsoPacketBuffer(packetIndex int) ([]byte, error) {
 	if packetIndex < 0 || packetIndex >= len(t.packets) {
 		return nil, ErrInvalidParameter
 	}
-	p := &t.packets[packetIndex]
-	start := int(p.Offset)
-	end := start + int(p.Length)
-	if end > len(t.buf) {
-		end = len(t.buf)
-	}
-	if start > end {
-		return t.buf[start:start], nil
-	}
+	packetSize := len(t.buf) / len(t.packets)
+	start := packetIndex * packetSize
+	end := min(start+int(t.packets[packetIndex].Length), start+packetSize)
 	return t.buf[start:end], nil
 }
 
 // IsoPacketBufferSlices returns a slice-per-packet view of the buffer.
 func (t *IsochronousTransfer) IsoPacketBufferSlices() [][]byte {
 	slices := make([][]byte, len(t.packets))
-	for i := range t.packets {
-		slices[i], _ = t.IsoPacketBuffer(i)
+	packetSize := len(t.buf) / len(t.packets)
+	for i, p := range t.packets {
+		start := i * packetSize
+		slices[i] = t.buf[start:min(start+int(p.Length), start+packetSize)]
 	}
 	return slices
 }
