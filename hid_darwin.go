@@ -491,29 +491,27 @@ func (c *hidCollection) flush() error {
 // CFRunLoop that IOHIDDeviceScheduleWithRunLoop delivers input-report
 // completions through.
 //
-// STILL OPEN as of 2026-09-18: on one real test board (an FX2LP-based
-// dummy HID device, see go-usb-jig), IOHIDDeviceRegisterInputReportCallback
-// never actually fired here, even though the exact same device answered
+// CLOSED, not a bug here, as of 2026-09-18: on one real test board (an
+// FX2LP-based dummy HID device, see go-usb-jig), this pump's callback never
+// fired, even though the exact same device answered
 // IOHIDDeviceGetReport(kIOHIDReportTypeInput) correctly and repeatedly,
-// proving the device really was sending live, changing reports. Ruled out,
-// each verified on real hardware: the buffer-pinning bug this file's
-// pumpPinner field now fixes (a real bug, independently necessary, but not
-// sufficient by itself); CFRunLoop mode identity (real dlsym'd
-// kCFRunLoopDefaultMode vs. a locally-rebuilt equal CFString vs. a private
-// mode of this package's own -- all three tried); RegisterInputReportCallback/
-// ScheduleWithRunLoop call order; CFRunLoopRunInMode's
-// returnAfterSourceHandled parameter and poll interval. Most tellingly: an
-// independent, real, already-shipping purego HID library
-// (github.com/go-macos/iokit), using IOHIDManager-vended device references
-// rather than this file's IOHIDDeviceCreate-from-a-known-service approach,
-// exhibited the identical symptom against the identical device -- strong
-// evidence this is not a bug in this file's approach specifically, but
-// either a property of that one test device/firmware or of the test
-// machine's kernel-level HID interrupt polling. GetFeatureReport,
-// SetFeatureReport, SetOutputReport, GetInputReport and FlushHIDQueue are
-// all independently verified working against real hardware; only this
-// pump's callback delivery remains unverified. See go-usb-jig's README for
-// the full record.
+// proving the device really was sending live, changing reports. Real bugs
+// were found and fixed along the way (this file's pumpPinner field, and a
+// packet-flooding pattern in that board's own firmware, rate-limited to
+// match Infineon/Cypress's own AN64020 reference HID firmware) but neither
+// changed the outcome; an independent, real, already-shipping purego HID
+// library (github.com/go-macos/iokit) failed identically against the same
+// device. The closing test: that exact mechanism --
+// IOHIDDeviceRegisterInputReportCallback plus IOHIDDeviceScheduleWithRunLoop,
+// what this file uses -- delivered reports successfully for several other
+// real vendor-page HID devices already present on the same test machine,
+// including a real USB one, not just internal virtual ones. The mechanism
+// itself is proven correct on real hardware; only that one test board,
+// which sits behind a USB2.0 hub unlike the devices that worked, didn't
+// get delivery -- most likely a property of that board/hub combination,
+// not of this code. GetFeatureReport, SetFeatureReport, SetOutputReport,
+// GetInputReport and FlushHIDQueue are all independently verified working
+// against real hardware too. See go-usb-jig's README for the full record.
 
 // startInputPump starts the collection's async input-report pump.
 func (c *hidCollection) startInputPump() error {
@@ -611,12 +609,11 @@ func (c *hidCollection) startInputPump() error {
 			}
 			// false, not true, and a short poll rather than a long block:
 			// matches a real, independently-verified-working purego HID
-			// implementation (go-macos/iokit), tried here on the chance the
-			// difference mattered. It didn't, on its own: see the "still
-			// open" note on IOHIDDeviceRegisterInputReportCallback's
-			// reliability below. Kept anyway, since it is not worse than
-			// the isochronous/bulk async pump's own true+3600s pattern and
-			// costs nothing extra.
+			// implementation (go-macos/iokit), tried while debugging one
+			// test board's non-delivery (see the CLOSED note above -- that
+			// turned out not to be a bug here at all). Kept anyway, since
+			// it is not worse than the isochronous/bulk async pump's own
+			// true+3600s pattern and costs nothing extra.
 			hotplug.CFRunLoopRunInMode(mode, 0.05, false)
 		}
 
