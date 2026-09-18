@@ -179,7 +179,16 @@ type Transfer struct {
 	mu sync.Mutex
 }
 
-// NewTransfer creates a new transfer
+// NewTransfer creates a new transfer.
+//
+// Deprecated: this whole family (NewTransfer, Transfer.Submit,
+// Transfer.Cancel, SubmitTransfer, ReapTransfer, CancelTransfer) reports
+// ErrNotSupported on Linux and Windows, and even here Submit only blocks
+// synchronously rather than actually queuing anything, and ReapTransfer is
+// unconditionally unimplemented. AsyncTransfer is the real, working
+// equivalent on every platform: use NewBulkTransfer, NewInterruptTransfer
+// or NewControlTransfer to create one, AsyncTransfer.Submit to queue it,
+// and AsyncTransfer.Wait or WaitWithTimeout to wait for it.
 func NewTransfer(handle *DeviceHandle, endpoint uint8, transferType TransferType, bufferSize int) *Transfer {
 	return &Transfer{
 		handle:       handle,
@@ -220,7 +229,9 @@ func (t *Transfer) GetUserData() interface{} {
 	return t.userData
 }
 
-// Submit submits the transfer
+// Submit submits the transfer.
+//
+// Deprecated: see NewTransfer's doc comment; use AsyncTransfer.Submit.
 func (t *Transfer) Submit() error {
 	// Simplified synchronous implementation
 	// A full implementation would use async IOKit APIs
@@ -267,7 +278,9 @@ func (t *Transfer) Submit() error {
 	return err
 }
 
-// Cancel cancels the transfer
+// Cancel cancels the transfer.
+//
+// Deprecated: see NewTransfer's doc comment; use AsyncTransfer.Cancel.
 func (t *Transfer) Cancel() error {
 	// Cancellation would require async API support
 	t.mu.Lock()
@@ -302,13 +315,18 @@ func (t *Transfer) Free() {
 	// Nothing to free in this implementation
 }
 
-// SubmitTransfer submits a transfer for asynchronous execution
+// SubmitTransfer submits a transfer for asynchronous execution.
+//
+// Deprecated: see NewTransfer's doc comment; use AsyncTransfer.Submit.
 func (h *DeviceHandle) SubmitTransfer(transfer *Transfer) error {
 	// Simplified implementation - just run synchronously for now
 	return transfer.Submit()
 }
 
-// ReapTransfer waits for a completed transfer
+// ReapTransfer waits for a completed transfer.
+//
+// Deprecated: see NewTransfer's doc comment; use AsyncTransfer.Wait or
+// WaitWithTimeout. Unconditionally unimplemented even on macOS.
 func (h *DeviceHandle) ReapTransfer(timeout time.Duration) (*Transfer, error) {
 	// This would need proper async implementation
 	return nil, fmt.Errorf("async transfers not fully implemented")
@@ -355,6 +373,8 @@ func (h *DeviceHandle) FreeStreams(endpoints []uint8) error {
 //
 // IOKit cancellation is per pipe rather than per transfer, so this aborts the
 // pipe the transfer was submitted on.
+//
+// Deprecated: see NewTransfer's doc comment; use AsyncTransfer.Cancel.
 func (h *DeviceHandle) CancelTransfer(transfer *Transfer) error {
 	if transfer == nil {
 		return ErrInvalidParameter

@@ -280,21 +280,38 @@ func (h *DeviceHandle) IsochronousTransfer(endpoint uint8, data []byte, numPacke
 }
 
 // SubmitTransfer submits an async transfer (not implemented)
+//
+// Deprecated: this whole family (SubmitTransfer, CancelTransfer,
+// ReapTransfer, NewTransfer, Transfer.Submit, Transfer.Cancel) reports
+// ErrNotSupported on Windows and Linux, and is only partially real on
+// macOS. AsyncTransfer is the real, working equivalent on every platform:
+// create one with NewBulkTransfer, NewInterruptTransfer or
+// NewControlTransfer, queue it with AsyncTransfer.Submit, and wait for it
+// with AsyncTransfer.Wait or WaitWithTimeout.
 func (h *DeviceHandle) SubmitTransfer(transfer *Transfer) error {
 	return ErrNotSupported
 }
 
 // CancelTransfer cancels an async transfer
+//
+// Deprecated: use AsyncTransfer.Cancel; see SubmitTransfer's doc comment.
 func (h *DeviceHandle) CancelTransfer(transfer *Transfer) error {
 	return ErrNotSupported
 }
 
 // ReapTransfer reaps a completed async transfer
+//
+// Deprecated: use AsyncTransfer.Wait or WaitWithTimeout; see
+// SubmitTransfer's doc comment.
 func (h *DeviceHandle) ReapTransfer(timeout time.Duration) (*Transfer, error) {
 	return nil, ErrNotSupported
 }
 
 // NewTransfer creates a new transfer object
+//
+// Deprecated: use NewBulkTransfer, NewInterruptTransfer or
+// NewControlTransfer, which return an AsyncTransfer; see SubmitTransfer's
+// doc comment for why.
 func NewTransfer(handle *DeviceHandle, endpoint uint8, transferType TransferType, bufferSize int) *Transfer {
 	return &Transfer{
 		handle:       handle,
@@ -340,6 +357,8 @@ func (t *Transfer) GetUserData() interface{} {
 }
 
 // Submit queues the transfer on its device handle.
+//
+// Deprecated: see SubmitTransfer's doc comment; use AsyncTransfer.Submit.
 func (t *Transfer) Submit() error {
 	if t.handle == nil {
 		return ErrInvalidParameter
@@ -348,6 +367,8 @@ func (t *Transfer) Submit() error {
 }
 
 // Cancel requests cancellation of a previously submitted transfer.
+//
+// Deprecated: see SubmitTransfer's doc comment; use AsyncTransfer.Cancel.
 func (t *Transfer) Cancel() error {
 	if t.handle == nil {
 		return ErrInvalidParameter

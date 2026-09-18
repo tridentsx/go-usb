@@ -208,28 +208,39 @@ func (h *DeviceHandle) IsochronousTransfer(endpoint uint8, data []byte, numPacke
 
 // SubmitTransfer submits a Transfer for asynchronous completion.
 //
-// The usbfs backend drives asynchronous work through AsyncTransfer, which owns
-// the URB lifetime and the reaping goroutine. The Transfer type is currently a
-// synchronous-only value on Linux, so this reports ErrNotSupported; use
-// NewBulkTransfer, NewInterruptTransfer or NewControlTransfer instead.
+// Deprecated: this whole family (SubmitTransfer, CancelTransfer,
+// ReapTransfer, NewTransfer, Transfer.Submit, Transfer.Cancel) reports
+// ErrNotSupported on Linux and Windows, and is only partially real on
+// macOS (Submit blocks synchronously rather than actually queuing
+// anything; ReapTransfer is unconditionally unimplemented there too).
+// AsyncTransfer is the real, working equivalent on every platform: create
+// one with NewBulkTransfer, NewInterruptTransfer or NewControlTransfer,
+// queue it with AsyncTransfer.Submit, and wait for it with
+// AsyncTransfer.Wait or WaitWithTimeout.
 func (h *DeviceHandle) SubmitTransfer(transfer *Transfer) error {
 	return ErrNotSupported
 }
 
 // CancelTransfer cancels a Transfer submitted with SubmitTransfer.
 //
-// See SubmitTransfer: use AsyncTransfer.Cancel instead.
+// Deprecated: use AsyncTransfer.Cancel; see SubmitTransfer's doc comment.
 func (h *DeviceHandle) CancelTransfer(transfer *Transfer) error {
 	return ErrNotSupported
 }
 
 // ReapTransfer waits for the next completed Transfer.
 //
-// See SubmitTransfer: use AsyncTransfer.Wait instead.
+// Deprecated: use AsyncTransfer.Wait or WaitWithTimeout; see
+// SubmitTransfer's doc comment.
 func (h *DeviceHandle) ReapTransfer(timeout time.Duration) (*Transfer, error) {
 	return nil, ErrNotSupported
 }
 
+// NewTransfer creates a Transfer.
+//
+// Deprecated: use NewBulkTransfer, NewInterruptTransfer or
+// NewControlTransfer, which return an AsyncTransfer; see SubmitTransfer's
+// doc comment for why.
 func NewTransfer(handle *DeviceHandle, endpoint uint8, transferType TransferType, bufferSize int) *Transfer {
 	return &Transfer{
 		handle:       handle,
@@ -274,6 +285,8 @@ func (t *Transfer) GetUserData() interface{} {
 }
 
 // Submit queues the transfer on its device handle.
+//
+// Deprecated: see SubmitTransfer's doc comment; use AsyncTransfer.Submit.
 func (t *Transfer) Submit() error {
 	if t.handle == nil {
 		return ErrInvalidParameter
@@ -282,6 +295,8 @@ func (t *Transfer) Submit() error {
 }
 
 // Cancel requests cancellation of a previously submitted transfer.
+//
+// Deprecated: see SubmitTransfer's doc comment; use AsyncTransfer.Cancel.
 func (t *Transfer) Cancel() error {
 	if t.handle == nil {
 		return ErrInvalidParameter
