@@ -263,9 +263,19 @@ func (h *DeviceHandle) GetDeviceDescriptor() (*DeviceDescriptor, error) {
 	return &desc, nil
 }
 
-// GetActiveConfigDescriptor returns the descriptor for the active configuration.
+// GetActiveConfigDescriptor returns the descriptor for the active
+// configuration, matching compat_windows.go's implementation of the same
+// method: read the active configuration's value, then fetch that
+// descriptor by value.
 func (h *DeviceHandle) GetActiveConfigDescriptor() (*ConfigDescriptor, error) {
-	return nil, ErrNotSupported
+	config, err := h.GetConfiguration()
+	if err != nil {
+		return nil, err
+	}
+	if config > 0 {
+		return h.ConfigDescriptorByValue(uint8(config))
+	}
+	return h.ConfigDescriptorByValue(1)
 }
 
 // GetConfigDescriptor returns a configuration descriptor by index.
@@ -287,6 +297,24 @@ func (h *DeviceHandle) GetConfigDescriptor(index uint8) (*ConfigDescriptor, erro
 // while ClaimInterface already holds h.mu.Lock(), and GetConfigDescriptor's
 // own h.mu.RLock() would deadlock against that.
 func fetchConfigDescriptor(dev *IOUSBDeviceInterface, index uint8) (*ConfigDescriptor, error) {
+	full, err := fetchRawConfigDescriptor(dev, index)
+	if err != nil {
+		return nil, err
+	}
+
+	config := &ConfigDescriptor{}
+	if err := config.Unmarshal(full); err != nil {
+		return nil, err
+	}
+	return config, nil
+}
+
+// fetchRawConfigDescriptor reads a configuration descriptor's raw bytes
+// directly off dev, with no locking of its own -- the same split reason as
+// fetchConfigDescriptor, and shared by it: RawConfigDescriptor wants the raw
+// bytes on their own, GetConfigDescriptor wants them parsed, and this is the
+// one place that actually issues the two-step (header-then-full) fetch.
+func fetchRawConfigDescriptor(dev *IOUSBDeviceInterface, index uint8) ([]byte, error) {
 	// Read the 9-byte header first to learn wTotalLength, then re-read the
 	// whole descriptor now that its size is known.
 	header := make([]byte, 9)
@@ -307,22 +335,97 @@ func fetchConfigDescriptor(dev *IOUSBDeviceInterface, index uint8) (*ConfigDescr
 	if err != nil {
 		return nil, err
 	}
+	return full, nil
+}
 
-	config := &ConfigDescriptor{}
-	if err := config.Unmarshal(full); err != nil {
+// GetBOSDescriptor reads the Binary Object Store descriptor, matching
+// compat_windows.go's implementation of the same method: a 5-byte header
+// read to learn wTotalLength (BOS's header is 5 bytes, not the 9 a
+// configuration descriptor's header is), then the full descriptor, then a
+// walk over each device capability's own 3-byte common header
+// (Length/DescriptorType/DevCapabilityType) -- the same depth
+// SSUSBDeviceCapabilityDescriptor/USB20ExtensionDescriptor below already
+// expect from this call, unchanged.
+func (h *DeviceHandle) GetBOSDescriptor() (*BOSDescriptor, []DeviceCapabilityDescriptor, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed || h.devInterface == nil {
+		return nil, nil, ErrDeviceNotFound
+	}
+
+	header := make([]byte, 5)
+	if _, err := h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+		descriptorRequestValue(USB_DT_BOS, 0), 0, header, 5000); err != nil {
+		return nil, nil, err
+	}
+	if header[1] != USB_DT_BOS {
+		return nil, nil, fmt.Errorf("invalid BOS descriptor")
+	}
+
+	bos := &BOSDescriptor{
+		Length:         header[0],
+		DescriptorType: header[1],
+		TotalLength:    binary.LittleEndian.Uint16(header[2:4]),
+		NumDeviceCaps:  header[4],
+	}
+
+	full := make([]byte, bos.TotalLength)
+	if _, err := h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+		descriptorRequestValue(USB_DT_BOS, 0), 0, full, 5000); err != nil {
+		return nil, nil, err
+	}
+
+	caps := make([]DeviceCapabilityDescriptor, 0, bos.NumDeviceCaps)
+	pos := 5
+	for i := 0; i < int(bos.NumDeviceCaps) && pos < len(full); i++ {
+		if pos+3 > len(full) {
+			break
+		}
+		length := int(full[pos])
+		if length < 3 || pos+length > len(full) {
+			break
+		}
+		caps = append(caps, DeviceCapabilityDescriptor{
+			Length:            full[pos],
+			DescriptorType:    full[pos+1],
+			DevCapabilityType: full[pos+2],
+		})
+		pos += length
+	}
+
+	return bos, caps, nil
+}
+
+// GetDeviceQualifierDescriptor reads the device qualifier descriptor,
+// matching compat_windows.go's implementation of the same method: a single
+// fixed 10-byte fetch, since USB_DT_DEVICE_QUALIFIER's length is fixed by
+// spec, unlike a configuration or BOS descriptor.
+func (h *DeviceHandle) GetDeviceQualifierDescriptor() (*DeviceQualifierDescriptor, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed || h.devInterface == nil {
+		return nil, ErrDeviceNotFound
+	}
+
+	buf := make([]byte, 10)
+	if _, err := h.devInterface.ControlTransfer(0x80, USB_REQ_GET_DESCRIPTOR,
+		descriptorRequestValue(USB_DT_DEVICE_QUALIFIER, 0), 0, buf, 5000); err != nil {
 		return nil, err
 	}
-	return config, nil
-}
 
-// GetBOSDescriptor reads the Binary Object Store descriptor.
-func (h *DeviceHandle) GetBOSDescriptor() (*BOSDescriptor, []DeviceCapabilityDescriptor, error) {
-	return nil, nil, ErrNotSupported
-}
-
-// GetDeviceQualifierDescriptor reads the device qualifier descriptor.
-func (h *DeviceHandle) GetDeviceQualifierDescriptor() (*DeviceQualifierDescriptor, error) {
-	return nil, ErrNotSupported
+	return &DeviceQualifierDescriptor{
+		Length:            buf[0],
+		DescriptorType:    buf[1],
+		USBVersion:        binary.LittleEndian.Uint16(buf[2:4]),
+		DeviceClass:       buf[4],
+		DeviceSubClass:    buf[5],
+		DeviceProtocol:    buf[6],
+		MaxPacketSize0:    buf[7],
+		NumConfigurations: buf[8],
+		Reserved:          buf[9],
+	}, nil
 }
 
 // GetCapabilities returns platform capability bits, which IOKit does not expose.

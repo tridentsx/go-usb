@@ -93,6 +93,22 @@ func (i *IOUSBInterfaceInterface) InterfaceNumber() (uint8, error) {
 	return num, nil
 }
 
+// AlternateSetting returns the interface's current alternate setting,
+// matching InterfaceNumber's exact pattern for the same real vtable entry
+// (GetAlternateSetting, paired with SetAlternateInterface below).
+func (i *IOUSBInterfaceInterface) AlternateSetting() (uint8, error) {
+	v := i.vtable()
+	if v == nil || v.GetAlternateSetting == 0 {
+		return 0, ErrDeviceNotFound
+	}
+	var alt uint8
+	ret, _, _ := purego.SyscallN(v.GetAlternateSetting, uintptr(i.handle), uintptr(unsafe.Pointer(&alt)))
+	if int32(ret) != kernSuccess {
+		return 0, ErrIO
+	}
+	return alt, nil
+}
+
 // NumEndpoints returns the number of endpoints on the interface's current
 // alternate setting, not counting the implicit control pipe.
 func (i *IOUSBInterfaceInterface) NumEndpoints() (uint8, error) {

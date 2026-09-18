@@ -1,6 +1,7 @@
 package usb
 
 import (
+	"encoding/binary"
 	"fmt"
 	"time"
 )
@@ -27,10 +28,15 @@ func (h *DeviceHandle) ConfigDescriptorByValue(value uint8) (*ConfigDescriptor, 
 	return h.GetConfigDescriptor(value - 1)
 }
 
-// RawConfigDescriptor returns the raw configuration descriptor bytes
+// RawConfigDescriptor returns the raw configuration descriptor bytes.
 func (h *DeviceHandle) RawConfigDescriptor(index uint8) ([]byte, error) {
-	// Not directly supported, would need to capture raw bytes during parsing
-	return nil, fmt.Errorf("raw config descriptor not implemented on macOS")
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed || h.devInterface == nil {
+		return nil, ErrDeviceNotFound
+	}
+	return fetchRawConfigDescriptor(h.devInterface, index)
 }
 
 // SetInterfaceAltSetting sets the alternate setting for an interface
@@ -44,10 +50,19 @@ func (h *DeviceHandle) Status(requestType uint8, index uint16) (uint16, error) {
 	return h.GetStatus(recipient, index)
 }
 
-// Interface gets the current alternate setting for an interface
+// Interface gets the current alternate setting for an interface.
 func (h *DeviceHandle) Interface(iface uint8) (uint8, error) {
-	// Not directly supported on macOS
-	return 0, fmt.Errorf("get interface not implemented on macOS")
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.closed {
+		return 0, ErrDeviceNotFound
+	}
+	intf, ok := h.interfaces[iface]
+	if !ok {
+		return 0, fmt.Errorf("interface %d not claimed", iface)
+	}
+	return intf.AlternateSetting()
 }
 
 // RawDescriptor reads a raw descriptor
@@ -106,10 +121,57 @@ func (h *DeviceHandle) Speed() (uint8, error) {
 	return uint8(speed), err
 }
 
-// SSEndpointCompanionDescriptor gets SuperSpeed endpoint companion descriptor
+// SSEndpointCompanionDescriptor gets the SuperSpeed endpoint companion
+// descriptor for one endpoint, matching device_linux.go's implementation of
+// the same method exactly: this logic is entirely portable (it only walks
+// the already-parsed ConfigDescriptor this platform's own
+// ConfigDescriptorByValue returns), so there was never a real reason for it
+// to be macOS-specific, only that nothing had ported it over yet.
 func (h *DeviceHandle) SSEndpointCompanionDescriptor(configIndex, interfaceNumber, altSetting, endpointAddress uint8) (*SuperSpeedEndpointCompanionDescriptor, error) {
-	// Would need to parse from config descriptor
-	return nil, fmt.Errorf("SS endpoint companion descriptor not implemented on macOS")
+	config, err := h.ConfigDescriptorByValue(configIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	altSettingDesc := config.InterfaceAltSetting(interfaceNumber, altSetting)
+	if altSettingDesc == nil {
+		return nil, fmt.Errorf("interface %d alt setting %d not found", interfaceNumber, altSetting)
+	}
+
+	for i := range altSettingDesc.Endpoints {
+		if altSettingDesc.Endpoints[i].EndpointAddr != endpointAddress {
+			continue
+		}
+		if altSettingDesc.Endpoints[i].SSCompanion != nil {
+			return altSettingDesc.Endpoints[i].SSCompanion, nil
+		}
+
+		extra := altSettingDesc.Endpoints[i].Extra
+		pos := 0
+		for pos+2 <= len(extra) {
+			length := int(extra[pos])
+			descType := extra[pos+1]
+			if length < 2 || pos+length > len(extra) {
+				break
+			}
+			if descType == USB_DT_SS_ENDPOINT_COMPANION {
+				if length < 6 {
+					return nil, fmt.Errorf("invalid SS endpoint companion descriptor length: %d", length)
+				}
+				return &SuperSpeedEndpointCompanionDescriptor{
+					Length:           extra[pos],
+					DescriptorType:   extra[pos+1],
+					MaxBurst:         extra[pos+2],
+					Attributes:       extra[pos+3],
+					BytesPerInterval: binary.LittleEndian.Uint16(extra[pos+4 : pos+6]),
+				}, nil
+			}
+			pos += length
+		}
+		return nil, fmt.Errorf("SS endpoint companion descriptor not found for endpoint %02x", endpointAddress)
+	}
+
+	return nil, fmt.Errorf("endpoint %02x not found", endpointAddress)
 }
 
 // SSUSBDeviceCapabilityDescriptor gets SuperSpeed USB device capability descriptor
