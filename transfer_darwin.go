@@ -3,6 +3,7 @@ package usb
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -155,6 +156,13 @@ type Transfer struct {
 	actualLength int
 	callback     TransferCallback
 	userData     interface{}
+
+	// mu guards status, actualLength, buffer and callback, which an
+	// AsyncTransfer's IOKit run-loop callback writes from whatever goroutine
+	// services the run loop, concurrently with the submitting goroutine
+	// reading them through Status, ActualLength or Buffer. Linux and Windows
+	// guard the same fields on their Transfer for the same reason.
+	mu sync.Mutex
 }
 
 // NewTransfer creates a new transfer
@@ -171,6 +179,8 @@ func NewTransfer(handle *DeviceHandle, endpoint uint8, transferType TransferType
 
 // SetBuffer replaces the transfer's data buffer.
 func (t *Transfer) SetBuffer(data []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.buffer = data
 }
 
@@ -181,6 +191,8 @@ func (t *Transfer) SetTimeout(timeout time.Duration) {
 
 // SetCallback sets the transfer callback
 func (t *Transfer) SetCallback(callback TransferCallback) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.callback = callback
 }
 
@@ -220,6 +232,7 @@ func (t *Transfer) Submit() error {
 		return fmt.Errorf("unknown transfer type")
 	}
 
+	t.mu.Lock()
 	t.actualLength = n
 	if err != nil {
 		if err == ErrTimeout {
@@ -230,10 +243,11 @@ func (t *Transfer) Submit() error {
 	} else {
 		t.status = TransferCompleted
 	}
+	callback := t.callback
+	t.mu.Unlock()
 
-	// Call callback if set
-	if t.callback != nil {
-		t.callback(t)
+	if callback != nil {
+		callback(t)
 	}
 
 	return err
@@ -242,22 +256,30 @@ func (t *Transfer) Submit() error {
 // Cancel cancels the transfer
 func (t *Transfer) Cancel() error {
 	// Cancellation would require async API support
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.status = TransferCancelled
 	return nil
 }
 
 // Status returns the transfer status
 func (t *Transfer) Status() TransferStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.status
 }
 
 // ActualLength returns the actual number of bytes transferred
 func (t *Transfer) ActualLength() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.actualLength
 }
 
 // Buffer returns the transfer buffer
 func (t *Transfer) Buffer() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	return t.buffer
 }
 

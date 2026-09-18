@@ -351,6 +351,13 @@ func (t *AsyncTransfer) Fill(data []byte) error {
 		return ErrDeviceBusy
 	}
 
+	// t.Transfer.mu, not t.mutex above, guards buffer: it's the lock
+	// Transfer.Buffer uses, and the run-loop completion callback writes
+	// actualLength and status under it too. See the field comment on
+	// Transfer.mu in transfer_darwin.go.
+	t.Transfer.mu.Lock()
+	defer t.Transfer.mu.Unlock()
+
 	if len(data) > len(t.buffer) {
 		t.buffer = make([]byte, len(data))
 	} else {

@@ -183,6 +183,12 @@ func (h *DeviceHandle) AsyncInterruptTransfer(endpoint uint8, data []byte, callb
 func (t *AsyncTransfer) completeAsync(result int32, actualLength uint32) {
 	t.mutex.Lock()
 
+	// t.Transfer.mu (distinct from t.mutex above, which guards
+	// submitted/completed/done on the AsyncTransfer wrapper itself) guards
+	// status, actualLength and callback, because Transfer.Status,
+	// ActualLength and Buffer are read directly by the submitting
+	// goroutine without going through AsyncTransfer at all.
+	t.Transfer.mu.Lock()
 	t.actualLength = int(actualLength)
 	switch result {
 	case kernSuccess:
@@ -193,6 +199,8 @@ func (t *AsyncTransfer) completeAsync(result int32, actualLength uint32) {
 		t.status = TransferError
 	}
 	callback := t.callback
+	t.Transfer.mu.Unlock()
+
 	t.markCompletedLocked()
 
 	t.mutex.Unlock()
