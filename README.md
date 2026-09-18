@@ -311,7 +311,7 @@ or the underlying mechanism is worth knowing about.
 | HID-class devices | raw, after detaching `usbhid` (most capable: vendor control too) | report-level only via `IOHIDDevice`, no vendor control | report-level only via `hid.dll`, no vendor control |
 | `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
-| Hotplug notifications (`RegisterHotplugCallback`) | not yet | yes (IOKit, verified against a real unplug/replug) | yes (`RegisterDeviceNotification`/`WM_DEVICECHANGE`) |
+| Hotplug notifications (`RegisterHotplugCallback`) | yes (`NETLINK_KOBJECT_UEVENT`, not yet run against real hardware) | yes (IOKit, verified against a real unplug/replug) | yes (`RegisterDeviceNotification`/`WM_DEVICECHANGE`) |
 
 ### Opening devices on Windows
 
@@ -453,19 +453,21 @@ interface class GUID.
 
 Use `IsValidDevicePath` to check a path for the current platform.
 
-### Hotplug is macOS-only for now
+### Hotplug
 
-`RegisterHotplugCallback` is real on macOS — verified against a live
-unplug/replug of a real hub, see [#20](https://github.com/kevmo314/go-usb/pull/20).
-Linux and Windows report `ErrNotSupported`; poll `DeviceList` there if you
-need to detect changes until their native mechanisms (netlink/udev,
-`RegisterDeviceNotification`) land.
+`RegisterHotplugCallback` is implemented on all three platforms now.
+macOS and Windows are verified against real hardware (a live unplug/replug
+of a real hub on macOS; `RegisterDeviceNotification`/`WM_DEVICECHANGE` on
+Windows). Linux uses a `NETLINK_KOBJECT_UEVENT` socket bound to the
+kernel's own uevent multicast group — the same raw stream udevd listens
+to, reached directly with no dependency on udevd or libudev being
+installed — but has not yet been run against real hardware; see
+`hotplug_linux.go`'s own comment for the design and what it assumes about
+kernel uevent ordering.
 
 ## Limitations
 
 - Requires appropriate permissions for USB device access
-- Hotplug notifications work on macOS and Windows; Linux is tracked but not
-  implemented yet (see the platform table above)
 - Bulk streams (`AllocStreams`) and `Capabilities` are Linux-only for now.
   `Capabilities` is a usbfs-specific concept, but bulk streams are not
   fundamentally impossible on macOS/Windows — see "Bulk streams are
