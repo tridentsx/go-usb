@@ -303,15 +303,15 @@ or the underlying mechanism is worth knowing about.
 |---|---|---|---|
 | Device enumeration | sysfs | IOKit | SetupAPI + hub IOCTLs (all devices) |
 | Control / bulk / interrupt transfers | yes | yes | yes |
-| Isochronous transfers | yes (usbfs URBs) | yes (IOKit) | `ErrNotSupported` |
-| Asynchronous transfers | yes (`AsyncTransfer`) | yes (`AsyncTransfer`) | not yet |
-| `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` | `ErrNotSupported`, use `AsyncTransfer` | yes | `ErrNotSupported` |
+| Isochronous transfers | yes (usbfs URBs) | yes (IOKit) | yes (WinUSB isoch API) |
+| Asynchronous transfers | yes (`AsyncTransfer`) | yes (`AsyncTransfer`) | yes (`AsyncTransfer`, overlapped I/O) |
+| `Transfer.Submit` / `CancelTransfer` / `ReapTransfer` | `ErrNotSupported`, use `AsyncTransfer` | yes | `ErrNotSupported`, use `AsyncTransfer` |
 | Bulk streams (`AllocStreams`) | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `DetachKernelDriver` / `AttachKernelDriver` | yes (`USBDEVFS_DISCONNECT`) | `ErrNotSupported` | `ErrNotSupported` |
 | HID-class devices | raw, after detaching `usbhid` | not yet | report-level via `hid.dll` |
 | `SetShortPacketMode`, `SubmitHighBandwidthIso` | yes | `ErrNotSupported` | `ErrNotSupported` |
 | `Capabilities` | usbfs capability bits | `ErrNotSupported` | `ErrNotSupported` |
-| Hotplug notifications (`RegisterHotplugCallback`) | not yet | yes (IOKit, verified against a real unplug/replug) | not yet |
+| Hotplug notifications (`RegisterHotplugCallback`) | not yet | yes (IOKit, verified against a real unplug/replug) | yes (`RegisterDeviceNotification`/`WM_DEVICECHANGE`) |
 
 ### Opening devices on Windows
 
@@ -419,10 +419,10 @@ need to detect changes until their native mechanisms (netlink/udev,
 ## Limitations
 
 - Requires appropriate permissions for USB device access
-- Hotplug notifications work on macOS; Linux and Windows are tracked but not
+- Hotplug notifications work on macOS and Windows; Linux is tracked but not
   implemented yet (see the platform table above)
-- The Windows backend is newer than the Linux and macOS ones; isochronous and
-  asynchronous transfers are not implemented there yet
+- Bulk streams (`AllocStreams`) and `Capabilities` are Linux-only; macOS and
+  Windows report `ErrNotSupported`
 
 ## Resources
 
