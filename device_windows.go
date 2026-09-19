@@ -146,6 +146,17 @@ type DeviceHandle struct {
 	// reached through hid.dll rather than WinUSB. It is the second transport
 	// behind this handle.
 	hid *hidDevice
+
+	// Shared I/O completion port backing every AsyncTransfer on this
+	// handle, started lazily on first async Submit -- see
+	// registerAsyncCompletion's comment for the full rationale, and
+	// async_windows.go's package comment for how this replaced a
+	// goroutine-per-Submit design.
+	asyncMu     sync.Mutex
+	iocp        windows.Handle
+	iocpPending map[*windows.Overlapped]*AsyncTransfer
+	iocpDone    chan struct{}
+	iocpRunning bool
 }
 
 // Open opens the USB device.
@@ -225,33 +236,53 @@ func (d *Device) Open() (*DeviceHandle, error) {
 	}, nil
 }
 
-// Close closes the device handle
 // Close closes the device handle.
 //
-// Known gap, found while fixing the analogous real deadlock on Linux (see
-// device_linux.go's reapLoop): an AsyncTransfer with a very long or
-// disabled timeout (SetTimeout(0) or a large duration) that is still
-// genuinely in flight when Close runs here is not cancelled first --
-// unlike Linux, which now polls and always notices h.closed on its own,
-// or macOS, where CFRunLoopStop unconditionally interrupts the run loop
-// regardless of what is pending. Windows' AsyncTransfer.Submit goroutine
-// is only bounded by its own timeout (5s by default, real and safe for
-// that common case), so this is a real but narrow gap: it only matters if
-// a caller opts into an unusually long wait and then closes concurrently.
-// Not fixed here: AsyncTransfer.Cancel takes h.mu.RLock(), and this
-// function holds h.mu.Lock() for its entire body, so calling Cancel from
-// here directly would self-deadlock on Go's non-reentrant RWMutex --
-// fixing this for real needs restructuring that locking, and verifying
-// the fix against real Windows hardware, neither of which happened in
-// this pass.
+// This used to have a real, documented-but-unfixed gap here: an
+// AsyncTransfer with a very long or disabled timeout that was still
+// genuinely in flight when Close ran was never cancelled, because
+// AsyncTransfer.Cancel takes h.mu.RLock() and this function held
+// h.mu.Lock() for its entire body -- calling Cancel from here would have
+// self-deadlocked on Go's non-reentrant RWMutex. Fixed the same way as
+// the analogous real deadlocks found on Linux (device_linux.go's
+// reapLoop, hotplug_linux.go's pump): the async completion pump -- not
+// Close itself -- is what cancels and notifies pending transfers, woken
+// immediately via PostQueuedCompletionStatus, Windows' own purpose-built
+// mechanism for interrupting a blocked GetQueuedCompletionStatus call
+// from another thread (the IOCP equivalent of Linux's self-pipe trick).
 func (h *DeviceHandle) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.closed {
+		h.mu.Unlock()
 		return nil
 	}
 	h.closed = true
+	iocpRunning := h.iocpRunning
+	iocp := h.iocp
+	iocpDone := h.iocpDone
+	fileHandle := h.fileHandle
+	h.mu.Unlock()
+
+	if iocpRunning {
+		// Cancel every transfer genuinely in flight so its completion (now
+		// an error) is reported promptly rather than only once Close
+		// finishes; harmless if nothing is pending. The kernel would
+		// cancel these on its own once the handles below close regardless.
+		h.asyncMu.Lock()
+		for overlapped := range h.iocpPending {
+			windows.CancelIoEx(fileHandle, overlapped)
+		}
+		h.asyncMu.Unlock()
+
+		// Wake iocpPump immediately -- it is asleep in GetQueuedCompletionStatus
+		// waiting for either a real completion or this signal, and has no
+		// other way to notice h.closed once blocked there.
+		windows.PostQueuedCompletionStatus(iocp, 0, 0, nil)
+		<-iocpDone
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
 
 	if h.hid != nil {
 		return h.hid.close()
@@ -272,6 +303,11 @@ func (h *DeviceHandle) Close() error {
 	if h.fileHandle != windows.InvalidHandle {
 		windows.CloseHandle(h.fileHandle)
 		h.fileHandle = windows.InvalidHandle
+	}
+
+	if h.iocp != 0 {
+		windows.CloseHandle(h.iocp)
+		h.iocp = 0
 	}
 
 	return nil
@@ -650,6 +686,118 @@ func (h *DeviceHandle) getInterfaceHandle(iface uint8) winusbInterfaceHandle {
 		return h.winusbHandle
 	}
 	return h.interfaceHandles[iface]
+}
+
+// registerAsyncCompletion associates this handle's fileHandle with a
+// shared I/O completion port on first use, starting one pump goroutine to
+// service it, and registers overlapped -> t so iocpPump can dispatch that
+// operation's eventual completion back to the right transfer.
+//
+// This is the Windows equivalent of device_linux.go's registerURBCompletion
+// and its reapLoop: one shared background waiter per handle rather than one
+// per in-flight transfer. Before this, every AsyncTransfer.Submit call
+// spawned its own goroutine that created a fresh Win32 Event object and
+// blocked on WaitForSingleObject for that one transfer alone -- correct,
+// but for N transfers in flight (the normal case for continuous
+// high-throughput capture, e.g. a logic analyzer keeping many buffers
+// queued) that meant N OS threads and N kernel Event objects, where
+// libusb's own windows_winusb.c backend uses exactly one thread blocked in
+// GetQueuedCompletionStatus on one shared port (CreateIoCompletionPort(...,
+// 1), confirmed against its real source) regardless of how many transfers
+// are outstanding. This does the same.
+//
+// Passing NULL for WinUsb_ReadPipe/WritePipe/ControlTransfer's
+// LengthTransferred parameter (rather than a live pointer, the way the
+// synchronous BulkTransfer/ControlTransfer wrappers do) is deliberate and
+// required, not an oversight: those wrappers can do that safely only
+// because they block until the operation completes, keeping that pointer
+// valid for as long as the kernel might still write to it. Submit here
+// returns immediately, so a stack- or call-scoped pointer would be
+// invalid by the time the kernel actually writes to it; qty from
+// GetQueuedCompletionStatus is the only safe source of the transferred
+// count for a truly async call.
+func (h *DeviceHandle) registerAsyncCompletion(overlapped *windows.Overlapped, t *AsyncTransfer) error {
+	h.asyncMu.Lock()
+	defer h.asyncMu.Unlock()
+
+	if !h.iocpRunning {
+		iocp, err := windows.CreateIoCompletionPort(windows.InvalidHandle, 0, 0, 1)
+		if err != nil {
+			return fmt.Errorf("CreateIoCompletionPort (create): %w", err)
+		}
+		if _, err := windows.CreateIoCompletionPort(h.fileHandle, iocp, 0, 0); err != nil {
+			windows.CloseHandle(iocp)
+			return fmt.Errorf("CreateIoCompletionPort (associate): %w", err)
+		}
+		h.iocp = iocp
+		h.iocpPending = make(map[*windows.Overlapped]*AsyncTransfer)
+		h.iocpDone = make(chan struct{})
+		h.iocpRunning = true
+		go h.iocpPump()
+	}
+
+	h.iocpPending[overlapped] = t
+	return nil
+}
+
+// unregisterAsyncCompletion removes a pending registration, used when
+// Submit fails to actually start the I/O after registering it.
+func (h *DeviceHandle) unregisterAsyncCompletion(overlapped *windows.Overlapped) {
+	h.asyncMu.Lock()
+	delete(h.iocpPending, overlapped)
+	h.asyncMu.Unlock()
+}
+
+// iocpPump is the single goroutine servicing every AsyncTransfer's
+// completion on this handle -- see registerAsyncCompletion's comment for
+// why there is exactly one of these per handle rather than one per
+// transfer.
+func (h *DeviceHandle) iocpPump() {
+	defer close(h.iocpDone)
+
+	for {
+		var qty uint32
+		var key uintptr
+		var overlapped *windows.Overlapped
+
+		err := windows.GetQueuedCompletionStatus(h.iocp, &qty, &key, &overlapped, windows.INFINITE)
+
+		if overlapped == nil {
+			// GetQueuedCompletionStatus itself failed (e.g. the port was
+			// closed) rather than reporting a completed-with-error I/O,
+			// which always has a real overlapped pointer -- nothing to
+			// dispatch either way. Close posts a synthetic nil-overlapped
+			// completion specifically to reach this path and wake this
+			// call; recheck h.closed to tell that apart from a genuine
+			// unexpected failure.
+			h.mu.RLock()
+			closed := h.closed
+			h.mu.RUnlock()
+			if closed {
+				return
+			}
+			continue
+		}
+
+		h.asyncMu.Lock()
+		t, ok := h.iocpPending[overlapped]
+		if ok {
+			delete(h.iocpPending, overlapped)
+		}
+		h.asyncMu.Unlock()
+
+		if !ok {
+			continue
+		}
+
+		t.mu.Lock()
+		t.xferred = int(qty)
+		t.lastErr = err
+		t.done = true
+		t.submitted = false
+		t.cond.Broadcast()
+		t.mu.Unlock()
+	}
 }
 
 // interfaceForEndpoint scans the stored raw configuration descriptors to find

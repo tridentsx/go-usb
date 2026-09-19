@@ -1,3 +1,23 @@
+// AsyncTransfer's real I/O submission and completion collection go through
+// a single shared I/O completion port per DeviceHandle (see
+// registerAsyncCompletion and iocpPump in device_windows.go), the same
+// architecture libusb's own windows_winusb.c backend uses (confirmed
+// against its real source: one CreateIoCompletionPort(..., 1) plus one
+// dedicated thread blocked in GetQueuedCompletionStatus, servicing every
+// outstanding transfer). This replaced an earlier version of this file
+// where Submit spawned a new goroutine per call, each of which created its
+// own throwaway Win32 Event object and blocked on WaitForSingleObject for
+// that one transfer alone: correct, but for N transfers in flight --
+// keeping many buffers queued for continuous high-throughput capture, e.g.
+// a logic analyzer, is the normal case for genuinely async I/O -- that
+// meant N OS threads and N kernel Event objects where one shared thread
+// and zero per-call Event objects suffice.
+//
+// HID devices are the one exception: hid.dll's own transport has no IOCP
+// integration in this package, so Submit still wraps it in a per-call
+// goroutine below. HID reports are small and interrupt-driven, not the
+// continuous high-throughput case this rewrite targets.
+
 package usb
 
 import (
@@ -6,14 +26,14 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // AsyncTransfer is the Windows implementation of asynchronous USB transfers.
-//
-// Internally Submit fires a goroutine that calls the synchronous WinUSB pipe
-// API so that the caller's goroutine is never blocked. Cancel aborts the
-// in-flight WinUSB pipe, which unblocks the transfer goroutine. The type
-// satisfies AsyncTransferInterface (asserted in api_contract_async.go).
+// The type satisfies AsyncTransferInterface (asserted in
+// api_contract_async.go).
 type AsyncTransfer struct {
 	handle       *DeviceHandle
 	endpoint     uint8
@@ -27,6 +47,15 @@ type AsyncTransfer struct {
 	done      bool
 	xferred   int
 	lastErr   error
+
+	// overlapped is owned by this transfer and reused across
+	// resubmissions, registered by its own address with the handle's
+	// shared completion port for the duration of each Submit. Must be
+	// zeroed before each reuse (Win32 requirement for a reused OVERLAPPED)
+	// and must not move once registered, which is why it is a field here
+	// rather than a stack-local passed down -- iocpPump dispatches
+	// completions by this exact address.
+	overlapped windows.Overlapped
 }
 
 // NewBulkTransfer creates an async bulk transfer with a pre-allocated buffer
@@ -128,16 +157,16 @@ func (t *AsyncTransfer) IsCompleted() bool {
 	return t.done
 }
 
-// Submit queues the transfer. The actual I/O runs on a goroutine owned by this
-// package; call Wait or WaitWithTimeout to collect the result.
+// Submit queues the transfer and returns immediately; it is not complete
+// when this returns. Call Wait or WaitWithTimeout.
 func (t *AsyncTransfer) Submit() error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	if t.submitted && !t.done {
+		t.mu.Unlock()
 		return fmt.Errorf("transfer already in flight")
 	}
 	if t.handle.closed {
+		t.mu.Unlock()
 		return ErrDeviceNotFound
 	}
 
@@ -145,64 +174,140 @@ func (t *AsyncTransfer) Submit() error {
 	t.done = false
 	t.xferred = 0
 	t.lastErr = nil
-
+	t.overlapped = windows.Overlapped{} // Win32 requires zeroing before reuse.
 	timeout := t.timeout
+	t.mu.Unlock()
 
-	go func() {
-		var n int
-		var err error
+	if t.handle.hid != nil {
+		go func() {
+			n, err := t.handle.hid.interruptTransfer(t.endpoint, t.buf, timeout)
+			t.mu.Lock()
+			t.xferred = n
+			t.lastErr = err
+			t.done = true
+			t.submitted = false
+			t.cond.Broadcast()
+			t.mu.Unlock()
+		}()
+		return nil
+	}
 
-		switch t.transferType {
-		case TransferTypeBulk, TransferTypeInterrupt:
-			n, err = t.handle.BulkTransfer(t.endpoint, t.buf, timeout)
-
-		case TransferTypeControl:
-			if len(t.buf) < setupPacketSize {
-				err = ErrInvalidParameter
-				break
-			}
-			requestType := t.buf[0]
-			request := t.buf[1]
-			value := binary.LittleEndian.Uint16(t.buf[2:4])
-			index := binary.LittleEndian.Uint16(t.buf[4:6])
-			wLength := int(binary.LittleEndian.Uint16(t.buf[6:8]))
-			data := t.buf[setupPacketSize:]
-			if wLength < len(data) {
-				data = data[:wLength]
-			}
-			n, err = t.handle.ControlTransfer(requestType, request, value, index, data, timeout)
-
-		default:
-			err = ErrNotSupported
-		}
-
+	if err := t.handle.registerAsyncCompletion(&t.overlapped, t); err != nil {
 		t.mu.Lock()
-		t.xferred = n
-		t.lastErr = err
-		t.done = true
 		t.submitted = false
-		t.cond.Broadcast()
 		t.mu.Unlock()
-	}()
+		return err
+	}
+
+	var submitErr error
+	switch t.transferType {
+	case TransferTypeBulk, TransferTypeInterrupt:
+		submitErr = t.submitPipeIO()
+	case TransferTypeControl:
+		submitErr = t.submitControlIO()
+	default:
+		submitErr = ErrNotSupported
+	}
+
+	if submitErr != nil {
+		t.handle.unregisterAsyncCompletion(&t.overlapped)
+		t.mu.Lock()
+		t.submitted = false
+		t.mu.Unlock()
+		return submitErr
+	}
 
 	return nil
 }
 
-// Wait blocks until the transfer completes and returns any error.
-func (t *AsyncTransfer) Wait() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for !t.done {
-		t.cond.Wait()
+// submitPipeIO issues the real overlapped WinUsb_ReadPipe/WritePipe call
+// for a bulk or interrupt transfer. LengthTransferred is deliberately NULL
+// -- see this file's package comment.
+func (t *AsyncTransfer) submitPipeIO() error {
+	h := t.handle
+	ifaceHdl := h.getInterfaceHandle(h.interfaceForEndpoint(t.endpoint))
+
+	var dataPtr unsafe.Pointer
+	if len(t.buf) > 0 {
+		dataPtr = unsafe.Pointer(&t.buf[0])
 	}
-	return t.lastErr
+
+	var r0 uintptr
+	var e1 error
+	if t.endpoint&0x80 != 0 {
+		r0, _, e1 = syscall.SyscallN(
+			procWinUsb_ReadPipe.Addr(),
+			uintptr(ifaceHdl),
+			uintptr(t.endpoint),
+			uintptr(dataPtr),
+			uintptr(len(t.buf)),
+			0,
+			uintptr(unsafe.Pointer(&t.overlapped)),
+		)
+	} else {
+		r0, _, e1 = syscall.SyscallN(
+			procWinUsb_WritePipe.Addr(),
+			uintptr(ifaceHdl),
+			uintptr(t.endpoint),
+			uintptr(dataPtr),
+			uintptr(len(t.buf)),
+			0,
+			uintptr(unsafe.Pointer(&t.overlapped)),
+		)
+	}
+
+	if r0 == 0 && e1 != windows.ERROR_IO_PENDING {
+		return fmt.Errorf("submitting async pipe %#x: %w", t.endpoint, e1)
+	}
+	return nil
+}
+
+// submitControlIO issues the real overlapped WinUsb_ControlTransfer call.
+// LengthTransferred is deliberately NULL -- see this file's package
+// comment. The setup packet is forwarded byte-for-byte from t.buf[:8]
+// rather than decoded and re-encoded, since NewControlTransfer's own
+// contract already requires it in WinUSB's exact wire layout.
+func (t *AsyncTransfer) submitControlIO() error {
+	if len(t.buf) < setupPacketSize {
+		return ErrInvalidParameter
+	}
+
+	var packet [setupPacketSize]byte
+	copy(packet[:], t.buf[:setupPacketSize])
+
+	wLength := int(binary.LittleEndian.Uint16(t.buf[6:8]))
+	data := t.buf[setupPacketSize:]
+	if wLength < len(data) {
+		data = data[:wLength]
+	}
+
+	ok, err := winusbControlTransfer(t.handle.winusbHandle, packet, data, nil, &t.overlapped)
+	if !ok && err != windows.ERROR_IO_PENDING {
+		return fmt.Errorf("submitting async control transfer: %w", err)
+	}
+	return nil
+}
+
+// Wait blocks until the transfer completes, honoring the timeout set by
+// SetTimeout (5s by default if never called) exactly like WaitWithTimeout
+// would with that same value.
+func (t *AsyncTransfer) Wait() error {
+	return t.WaitWithTimeout(t.timeout)
 }
 
 // WaitWithTimeout blocks until the transfer completes or d elapses.
 // On timeout, Cancel is called to abort the in-flight pipe.
 func (t *AsyncTransfer) WaitWithTimeout(d time.Duration) error {
 	done := make(chan error, 1)
-	go func() { done <- t.Wait() }()
+	go func() {
+		t.mu.Lock()
+		for !t.done {
+			t.cond.Wait()
+		}
+		err := t.lastErr
+		t.mu.Unlock()
+		done <- err
+	}()
 	select {
 	case err := <-done:
 		return err
@@ -212,16 +317,30 @@ func (t *AsyncTransfer) WaitWithTimeout(d time.Duration) error {
 	}
 }
 
-// Cancel aborts the in-flight transfer by aborting its WinUSB pipe. For
-// control transfers, AbortPipe is not available; Cancel is a no-op and the
-// transfer completes normally (or with an I/O error on device removal).
+// Cancel aborts the in-flight transfer. For bulk and interrupt transfers
+// this aborts the whole WinUSB pipe (WinUsb_AbortPipe offers no way to
+// cancel one specific pending request without affecting others queued on
+// the same pipe); for control transfers, which have no pipe of their own,
+// CancelIoEx cancels this transfer's own pending overlapped operation
+// specifically. Either way the aborted transfer still completes normally
+// through iocpPump, now with an error status.
 func (t *AsyncTransfer) Cancel() error {
+	if t.handle.hid != nil {
+		return nil // HID has no overlapped operation here to cancel.
+	}
+
 	t.handle.mu.RLock()
 	defer t.handle.mu.RUnlock()
 
-	if t.handle.closed || t.transferType == TransferTypeControl {
+	if t.handle.closed {
 		return nil
 	}
+
+	if t.transferType == TransferTypeControl {
+		windows.CancelIoEx(t.handle.fileHandle, &t.overlapped)
+		return nil
+	}
+
 	if t.handle.winusbHandle == 0 {
 		return nil
 	}
