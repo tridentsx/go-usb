@@ -52,6 +52,18 @@ import (
 // depend on udevd being installed or running at all).
 const linuxUeventGroupKernel = 1
 
+// linuxHotplugRecvTimeout bounds each Recvfrom in pump() via SO_RCVTIMEO, so
+// the loop revisits h.stopped on its own on a real schedule instead of
+// blocking in the kernel indefinitely. Confirmed on real hardware that
+// closing the socket from Deregister (this package's first attempt) does
+// not reliably unblock a Recvfrom already parked in the kernel on another
+// goroutine -- unlike a net.Conn, a raw syscall.Socket fd is not registered
+// with the Go runtime's poller, and Linux does not guarantee that close()
+// from a different thread interrupts a blocking read/recvfrom already in
+// progress on that fd. Same fix shape as device_linux.go's reapLoop: trade
+// a true blocking wait for a bounded one and poll a flag.
+const linuxHotplugRecvTimeout = 200 * time.Millisecond
+
 // linuxHotplugHandle is the HotplugHandle returned to callers.
 type linuxHotplugHandle struct {
 	mu      sync.Mutex
@@ -66,10 +78,9 @@ type linuxHotplugHandle struct {
 }
 
 // Deregister stops the watch and blocks until the pump goroutine has
-// exited. Closing the netlink socket unblocks its Recvfrom, which is the
-// only way to interrupt it: unlike a net.Conn, a raw syscall.Socket fd is
-// not registered with the Go runtime's poller, so nothing else can cancel
-// a call already blocked in the kernel.
+// exited. Setting stopped is enough on its own: pump's Recvfrom is bounded
+// by linuxHotplugRecvTimeout, so it revisits stopped within one timeout
+// interval on its own and closes the socket itself on the way out.
 func (h *linuxHotplugHandle) Deregister() error {
 	h.mu.Lock()
 	if h.stopped {
@@ -77,10 +88,8 @@ func (h *linuxHotplugHandle) Deregister() error {
 		return nil
 	}
 	h.stopped = true
-	fd := h.fd
 	h.mu.Unlock()
 
-	syscall.Close(fd)
 	<-h.done
 	return nil
 }
@@ -130,6 +139,12 @@ func registerHotplugCallback(vendorID, productID uint16, callback HotplugCallbac
 		return nil, fmt.Errorf("bind(AF_NETLINK): %w", err)
 	}
 
+	tv := syscall.NsecToTimeval(linuxHotplugRecvTimeout.Nanoseconds())
+	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("setsockopt(SO_RCVTIMEO): %w", err)
+	}
+
 	h := &linuxHotplugHandle{
 		fd:        fd,
 		seen:      make(map[string]*Device),
@@ -158,17 +173,31 @@ func registerHotplugCallback(vendorID, productID uint16, callback HotplugCallbac
 }
 
 func (h *linuxHotplugHandle) pump() {
+	defer func() {
+		syscall.Close(h.fd)
+		close(h.done)
+	}()
+
 	buf := make([]byte, 8192)
 	for {
+		h.mu.Lock()
+		stopped := h.stopped
+		h.mu.Unlock()
+		if stopped {
+			return
+		}
+
 		n, _, err := syscall.Recvfrom(h.fd, buf, 0)
+		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+			// SO_RCVTIMEO expired with nothing to read -- go recheck stopped.
+			continue
+		}
 		if err != nil {
-			// Either Deregister closed the socket, or a real error that
-			// leaves nothing more to read from it either way.
-			break
+			// A real error leaves nothing more to read from this fd either way.
+			return
 		}
 		h.handleUevent(buf[:n])
 	}
-	close(h.done)
 }
 
 func (h *linuxHotplugHandle) handleUevent(raw []byte) {
