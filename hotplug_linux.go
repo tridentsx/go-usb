@@ -52,23 +52,17 @@ import (
 // depend on udevd being installed or running at all).
 const linuxUeventGroupKernel = 1
 
-// linuxHotplugRecvTimeout bounds each Recvfrom in pump() via SO_RCVTIMEO, so
-// the loop revisits h.stopped on its own on a real schedule instead of
-// blocking in the kernel indefinitely. Confirmed on real hardware that
-// closing the socket from Deregister (this package's first attempt) does
-// not reliably unblock a Recvfrom already parked in the kernel on another
-// goroutine -- unlike a net.Conn, a raw syscall.Socket fd is not registered
-// with the Go runtime's poller, and Linux does not guarantee that close()
-// from a different thread interrupts a blocking read/recvfrom already in
-// progress on that fd. Same fix shape as device_linux.go's reapLoop: trade
-// a true blocking wait for a bounded one and poll a flag.
-const linuxHotplugRecvTimeout = 200 * time.Millisecond
-
 // linuxHotplugHandle is the HotplugHandle returned to callers.
 type linuxHotplugHandle struct {
 	mu      sync.Mutex
 	stopped bool
 	fd      int
+
+	// wakeR/wakeW are a pipe used solely to interrupt pump's epoll_wait
+	// immediately when Deregister sets h.stopped -- see pump's own comment
+	// for why closing the socket alone (this package's first attempt at
+	// this) is not a reliable way to do that.
+	wakeR, wakeW int
 
 	seen                map[string]*Device // "bus:addr" -> Device built on arrival
 	vendorID, productID uint16
@@ -78,9 +72,8 @@ type linuxHotplugHandle struct {
 }
 
 // Deregister stops the watch and blocks until the pump goroutine has
-// exited. Setting stopped is enough on its own: pump's Recvfrom is bounded
-// by linuxHotplugRecvTimeout, so it revisits stopped within one timeout
-// interval on its own and closes the socket itself on the way out.
+// exited. Writing to wakeW interrupts pump's epoll_wait immediately; it
+// has no other way to notice h.stopped once blocked there.
 func (h *linuxHotplugHandle) Deregister() error {
 	h.mu.Lock()
 	if h.stopped {
@@ -90,6 +83,7 @@ func (h *linuxHotplugHandle) Deregister() error {
 	h.stopped = true
 	h.mu.Unlock()
 
+	syscall.Write(h.wakeW, []byte{0})
 	<-h.done
 	return nil
 }
@@ -139,14 +133,16 @@ func registerHotplugCallback(vendorID, productID uint16, callback HotplugCallbac
 		return nil, fmt.Errorf("bind(AF_NETLINK): %w", err)
 	}
 
-	tv := syscall.NsecToTimeval(linuxHotplugRecvTimeout.Nanoseconds())
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+	var wakeFDs [2]int
+	if err := syscall.Pipe2(wakeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
 		syscall.Close(fd)
-		return nil, fmt.Errorf("setsockopt(SO_RCVTIMEO): %w", err)
+		return nil, fmt.Errorf("pipe2: %w", err)
 	}
 
 	h := &linuxHotplugHandle{
 		fd:        fd,
+		wakeR:     wakeFDs[0],
+		wakeW:     wakeFDs[1],
 		seen:      make(map[string]*Device),
 		vendorID:  vendorID,
 		productID: productID,
@@ -172,13 +168,46 @@ func registerHotplugCallback(vendorID, productID uint16, callback HotplugCallbac
 	return h, nil
 }
 
+// pump reads uevents off the netlink socket and dispatches them.
+//
+// Blocks in epoll_wait on two fds: the netlink socket, and wakeR, a pipe
+// Deregister writes a byte to specifically to interrupt this wait
+// immediately. Same shape as device_linux.go's reapLoop and for the same
+// reason -- see that function's comment for the full rationale, including
+// the real libusb source (events_posix.c) this mirrors and the kernel
+// quirk (devio.c's usbdev_poll reporting readiness via EPOLLOUT) that
+// applies there but not here: a netlink socket behaves normally, so
+// EPOLLIN is the right interest for it.
+//
+// This replaced an earlier version that bounded each Recvfrom with
+// SO_RCVTIMEO and polled h.stopped on that timer instead. That worked but
+// added up to the timeout's worth of latency to every uevent, for no
+// reason beyond simplicity; blocking in epoll_wait has none.
 func (h *linuxHotplugHandle) pump() {
 	defer func() {
 		syscall.Close(h.fd)
+		syscall.Close(h.wakeR)
+		syscall.Close(h.wakeW)
 		close(h.done)
 	}()
 
+	epfd, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
+	if err != nil {
+		return
+	}
+	defer syscall.Close(epfd)
+
+	sockEvent := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(h.fd)}
+	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, h.fd, &sockEvent); err != nil {
+		return
+	}
+	wakeEvent := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(h.wakeR)}
+	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, h.wakeR, &wakeEvent); err != nil {
+		return
+	}
+
 	buf := make([]byte, 8192)
+	events := make([]syscall.EpollEvent, 2)
 	for {
 		h.mu.Lock()
 		stopped := h.stopped
@@ -187,16 +216,35 @@ func (h *linuxHotplugHandle) pump() {
 			return
 		}
 
-		n, _, err := syscall.Recvfrom(h.fd, buf, 0)
-		if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
-			// SO_RCVTIMEO expired with nothing to read -- go recheck stopped.
+		n, err := syscall.EpollWait(epfd, events, -1)
+		if err == syscall.EINTR {
 			continue
 		}
 		if err != nil {
-			// A real error leaves nothing more to read from this fd either way.
 			return
 		}
-		h.handleUevent(buf[:n])
+
+		for i := 0; i < n; i++ {
+			if events[i].Fd == int32(h.wakeR) {
+				var b [8]byte
+				syscall.Read(h.wakeR, b[:])
+				continue
+			}
+
+			// Drain every uevent currently queued on the socket before
+			// going back to epoll_wait, same as reapLoop drains every
+			// reapable URB per wakeup.
+			for {
+				nRead, _, err := syscall.Recvfrom(h.fd, buf, syscall.MSG_DONTWAIT)
+				if err == syscall.EAGAIN || err == syscall.EWOULDBLOCK {
+					break
+				}
+				if err != nil {
+					return
+				}
+				h.handleUevent(buf[:nRead])
+			}
+		}
 	}
 }
 

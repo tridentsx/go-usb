@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 )
 
@@ -64,6 +63,11 @@ type DeviceHandle struct {
 	reapMap   map[uintptr]func(error) // URB ptr -> completion callback
 	reaping   bool                    // Is reaper running?
 	reapDone  chan struct{}           // Signals reaper has stopped
+
+	// reapWakeR/reapWakeW are a pipe used solely to interrupt reapLoop's
+	// epoll_wait immediately when Close sets h.closed -- see reapLoop's own
+	// comment for why a bare epoll_wait on the device fd alone isn't enough.
+	reapWakeR, reapWakeW int
 }
 
 func (d *Device) Open() (*DeviceHandle, error) {
@@ -92,12 +96,13 @@ func (h *DeviceHandle) Close() error {
 	}
 	h.closed = true
 	reapDone := h.reapDone
+	wakeW := h.reapWakeW
 	h.mu.Unlock()
 
-	// Cancel all pending URBs so REAPURB unblocks in the reap loop.
-	// Without this, Close() deadlocks if the reap loop is blocked on REAPURB
-	// and no more URB completions will arrive (e.g., programmatic close without
-	// USB disconnect).
+	// Cancel all pending URBs so their callbacks are reported as errors
+	// promptly. The kernel would discard any still-outstanding URBs on its
+	// own once the fd closes below regardless, but doing it here means
+	// callers find out now rather than only once Close finishes.
 	h.reapMutex.Lock()
 	for urbPtr := range h.reapMap {
 		syscall.Syscall(
@@ -110,6 +115,10 @@ func (h *DeviceHandle) Close() error {
 	h.reapMutex.Unlock()
 
 	if reapDone != nil {
+		// Wake reapLoop's epoll_wait immediately -- it is asleep waiting
+		// for either a reapable URB or this signal, and has no other way
+		// to notice h.closed once blocked in epoll_wait(-1).
+		syscall.Write(wakeW, []byte{0})
 		<-reapDone
 	}
 
@@ -123,60 +132,93 @@ func (h *DeviceHandle) Close() error {
 	return syscall.Close(h.fd)
 }
 
-// registerURBCompletion registers a URB for completion notification
-func (h *DeviceHandle) registerURBCompletion(urbPtr uintptr, callback func(error)) {
+// registerURBCompletion registers a URB for completion notification,
+// starting the reap loop (and its wake pipe) on first use.
+//
+// Returns an error only if creating that wake pipe fails, which in
+// practice means the process is out of file descriptors entirely --
+// essentially never, but the caller has already submitted the URB to the
+// kernel by this point, so on error it must discard that URB rather than
+// leave it dangling with no registered callback.
+func (h *DeviceHandle) registerURBCompletion(urbPtr uintptr, callback func(error)) error {
 	h.reapMutex.Lock()
 	defer h.reapMutex.Unlock()
 
-	// Register the callback
-	h.reapMap[urbPtr] = callback
-
-	// Start reaper if not already running
 	if !h.reaping {
+		var fds [2]int
+		if err := syscall.Pipe2(fds[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
+			return fmt.Errorf("failed to create reap wake pipe: %w", err)
+		}
+		h.reapWakeR, h.reapWakeW = fds[0], fds[1]
 		h.reaping = true
 		h.reapDone = make(chan struct{})
 		go h.reapLoop()
 	}
-}
 
-// reapPollInterval is how long reapLoop sleeps between REAPURBNDELAY polls
-// when nothing is ready to reap. Short enough that transfer completions and
-// Close still feel prompt, long enough that idling costs nothing
-// meaningful in CPU.
-const reapPollInterval = 5 * time.Millisecond
+	h.reapMap[urbPtr] = callback
+	return nil
+}
 
 // reapLoop reaps completed URBs and notifies waiting transfers.
 //
-// Uses USBDEVFS_REAPURBNDELAY (the non-blocking variant), polled on
-// reapPollInterval, rather than the plain blocking USBDEVFS_REAPURB this
-// used before. That version could deadlock Close(): Close cancels
-// outstanding URBs via USBDEVFS_DISCARDURB specifically so a REAPURB call
-// already blocked in the kernel unblocks -- but if the reap loop has
-// already reaped everything and gone back to waiting on a *fresh* blocking
-// REAPURB call with nothing outstanding, there is nothing left for Close
-// to discard, and that call never returns on its own, since no further URB
-// will ever be submitted once close begins. Confirmed on real hardware:
-// TestAsyncBulkLoopback's one URB completed (with a real, unrelated
-// EOVERFLOW status), reapLoop went back to a fresh blocking REAPURB with
-// an empty reapMap, and Close hung forever waiting for a reap loop that
-// could never notice h.closed on its own. Polling fixes this structurally:
-// the loop always revisits h.closed on its own within one poll interval,
-// with no dependency on an outstanding URB existing to cancel.
+// Blocks in epoll_wait on two fds: the device fd itself, and reapWakeR, a
+// pipe Close writes a byte to specifically to interrupt this wait
+// immediately. This mirrors libusb's own linux_usbfs.c exactly: it too
+// reaps via the non-blocking USBDEVFS_REAPURBNDELAY only after poll/epoll
+// reports the device fd ready, and uses a self-pipe/eventfd (see its
+// events_posix.c) to interrupt that wait for cancellation, rather than
+// libusb's *earlier* history of a plain blocking USBDEVFS_REAPURB.
+//
+// Confirmed against the actual kernel source (drivers/usb/core/devio.c,
+// usbdev_poll): usbfs reports a reapable URB via EPOLLOUT, not EPOLLIN --
+// an easy-to-get-backwards kernel quirk, but the same one libusb's own
+// usbi_add_event_source(ctx, fd, POLLOUT) call relies on, so this matches
+// it deliberately rather than by accident.
+//
+// This replaced an earlier version of this fix that polled
+// USBDEVFS_REAPURBNDELAY on a 5ms timer instead of using epoll. That
+// avoided the real deadlock this whole mechanism exists to fix (see git
+// history), but added up to 5ms of latency to every completion
+// notification even under load -- enough to matter for a continuous
+// high-throughput capture device (e.g. a logic analyzer) with a shallow
+// in-flight buffer count, where 5ms of added latency before the host
+// notices a buffer is free to resubmit can starve the device's FIFO into
+// overflowing. This version has no such added latency: epoll_wait returns
+// as soon as the kernel actually has something ready, same as libusb.
 func (h *DeviceHandle) reapLoop() {
 	defer func() {
+		syscall.Close(h.reapWakeR)
+		syscall.Close(h.reapWakeW)
 		if h.reapDone != nil {
 			close(h.reapDone)
 		}
 	}()
 
+	epfd, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
+	if err != nil {
+		h.failReaping(fmt.Errorf("epoll_create1: %w", err))
+		return
+	}
+	defer syscall.Close(epfd)
+
+	devEvent := syscall.EpollEvent{Events: syscall.EPOLLOUT, Fd: int32(h.fd)}
+	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, h.fd, &devEvent); err != nil {
+		h.failReaping(fmt.Errorf("epoll_ctl(device fd): %w", err))
+		return
+	}
+	wakeEvent := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(h.reapWakeR)}
+	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, h.reapWakeR, &wakeEvent); err != nil {
+		h.failReaping(fmt.Errorf("epoll_ctl(wake pipe): %w", err))
+		return
+	}
+
+	events := make([]syscall.EpollEvent, 2)
 	for {
-		// Check if handle is closed
 		h.mu.RLock()
 		closed := h.closed
 		h.mu.RUnlock()
 
 		if closed {
-			// Notify all pending transfers that we're closing
 			h.reapMutex.Lock()
 			for _, callback := range h.reapMap {
 				callback(ErrDeviceNotFound)
@@ -187,10 +229,54 @@ func (h *DeviceHandle) reapLoop() {
 			return
 		}
 
-		// Poll for a completed URB without blocking, so this loop always
-		// comes back around to check h.closed above rather than
-		// potentially waiting forever for a completion that may never
-		// arrive.
+		n, err := syscall.EpollWait(epfd, events, -1)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			h.failReaping(fmt.Errorf("epoll_wait: %w", err))
+			return
+		}
+
+		// A wakeup on the pipe only means "go recheck h.closed"; drain the
+		// byte Close wrote so the fd stops reporting readable, but the
+		// real state change is re-read at the top of the loop either way.
+		for i := 0; i < n; i++ {
+			if events[i].Fd == int32(h.reapWakeR) {
+				var buf [8]byte
+				syscall.Read(h.reapWakeR, buf[:])
+			}
+		}
+
+		if !h.drainReapedURBs() {
+			return
+		}
+	}
+}
+
+// failReaping reports err to every pending callback and stops reaping.
+// Used for reapLoop setup/wait failures that leave nothing left to reap.
+func (h *DeviceHandle) failReaping(err error) {
+	h.reapMutex.Lock()
+	for _, callback := range h.reapMap {
+		callback(err)
+	}
+	h.reapMap = make(map[uintptr]func(error))
+	h.reaping = false
+	h.reapMutex.Unlock()
+}
+
+// drainReapedURBs calls USBDEVFS_REAPURBNDELAY repeatedly until nothing
+// more is ready (EAGAIN), notifying each URB's registered callback as it
+// goes. usbfs can have more than one URB ready at a time, so this drains
+// all of them per epoll wakeup rather than needing one epoll_wait round
+// trip per URB -- the same thing libusb's reap_for_handle does.
+//
+// Returns false if a fatal ioctl error stopped reaping entirely (already
+// reported via failReaping); true otherwise, including the ordinary case
+// where there was simply nothing left to reap.
+func (h *DeviceHandle) drainReapedURBs() bool {
+	for {
 		var reapedURB *URB
 
 		_, _, errno := syscall.Syscall(
@@ -200,25 +286,16 @@ func (h *DeviceHandle) reapLoop() {
 			uintptr(unsafe.Pointer(&reapedURB)),
 		)
 		if errno == syscall.EAGAIN {
-			// Nothing ready yet -- the expected, common case while idling.
-			time.Sleep(reapPollInterval)
-			continue
+			return true
 		}
 		if errno == syscall.EINTR {
 			continue
 		}
 		if errno != 0 {
-			h.reapMutex.Lock()
-			for _, callback := range h.reapMap {
-				callback(fmt.Errorf("reaper failed: %v", errno))
-			}
-			h.reapMap = make(map[uintptr]func(error))
-			h.reaping = false
-			h.reapMutex.Unlock()
-			return
+			h.failReaping(fmt.Errorf("reaper failed: %v", errno))
+			return false
 		}
 
-		// Find the callback for this URB
 		h.reapMutex.Lock()
 		callback, ok := h.reapMap[uintptr(unsafe.Pointer(reapedURB))]
 		if !ok {
@@ -229,7 +306,6 @@ func (h *DeviceHandle) reapLoop() {
 		delete(h.reapMap, uintptr(unsafe.Pointer(reapedURB)))
 		h.reapMutex.Unlock()
 
-		// Call the callback with the URB status
 		var err error
 		if reapedURB.Status != 0 {
 			err = fmt.Errorf("URB completed with status: %d", reapedURB.Status)

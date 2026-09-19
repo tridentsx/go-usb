@@ -158,7 +158,7 @@ func (t *IsochronousTransfer) Submit() error {
 	t.reaped = false
 
 	// Register with centralized reaper
-	t.handle.registerURBCompletion(uintptr(unsafe.Pointer(t.urb)), func(err error) {
+	err := t.handle.registerURBCompletion(uintptr(unsafe.Pointer(t.urb)), func(err error) {
 		// Process URB completion
 		t.reapCond.L.Lock()
 		defer t.reapCond.L.Unlock()
@@ -186,6 +186,11 @@ func (t *IsochronousTransfer) Submit() error {
 		t.reaped = true
 		t.reapCond.Broadcast()
 	})
+	if err != nil {
+		syscall.Syscall(syscall.SYS_IOCTL, uintptr(t.handle.fd), USBDEVFS_DISCARDURB, uintptr(unsafe.Pointer(t.urb)))
+		t.submitted = false
+		return err
+	}
 
 	return nil
 }
@@ -438,7 +443,7 @@ func (t *AsyncBulkTransfer) Submit() error {
 	t.reapCond.L.Unlock()
 
 	// Register with centralized reaper
-	t.handle.registerURBCompletion(uintptr(unsafe.Pointer(t.urb)), func(err error) {
+	err := t.handle.registerURBCompletion(uintptr(unsafe.Pointer(t.urb)), func(err error) {
 		t.reapCond.L.Lock()
 		defer t.reapCond.L.Unlock()
 
@@ -446,6 +451,13 @@ func (t *AsyncBulkTransfer) Submit() error {
 		t.reaped = true
 		t.reapCond.Broadcast()
 	})
+	if err != nil {
+		syscall.Syscall(syscall.SYS_IOCTL, uintptr(t.handle.fd), USBDEVFS_DISCARDURB, uintptr(unsafe.Pointer(t.urb)))
+		t.reapCond.L.Lock()
+		t.reaped = true
+		t.reapCond.L.Unlock()
+		return err
+	}
 
 	return nil
 }
