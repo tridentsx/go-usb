@@ -1,6 +1,37 @@
 package usb
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// TestHotplugDeregisterDoesNotDeadlock is a real regression test for a
+// deadlock found on real hardware: Deregister used to close the netlink
+// socket and wait for pump to exit, but closing a raw socket fd from
+// another goroutine does not reliably unblock a Recvfrom already blocked
+// on it in the Linux kernel, so pump could sit in that Recvfrom forever
+// and Deregister would never return. This reproduces without any real USB
+// device or hotplug event at all -- the deadlock was in the shutdown path
+// itself, triggered by Deregister running before any uevent ever arrives,
+// which is exactly what a register-then-immediately-deregister call does.
+func TestHotplugDeregisterDoesNotDeadlock(t *testing.T) {
+	handle, err := RegisterHotplugCallback(0, 0, func(HotplugEvent, *Device) {})
+	if err != nil {
+		t.Fatalf("RegisterHotplugCallback: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- handle.Deregister() }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Deregister: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Deregister did not return within 5s -- deadlocked (see this test's own doc comment for the real bug it guards against)")
+	}
+}
 
 // TestParseUevent uses a payload shaped like a real kernel USB device add
 // uevent (see kobject_uevent_env() in the kernel source for the real field
