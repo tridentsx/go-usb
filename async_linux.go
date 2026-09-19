@@ -280,10 +280,13 @@ func (t *AsyncTransfer) waitForReaping() {
 	}
 }
 
-// Wait waits for transfer completion with timeout
+// Wait blocks until the transfer completes, honoring the timeout set by
+// SetTimeout (5s by default if never called) exactly like WaitWithTimeout
+// would with that same value -- usbfs URBs have no kernel-side timeout of
+// their own, so nothing else would ever make this return on a transfer
+// that genuinely never completes.
 func (t *AsyncTransfer) Wait() error {
-	t.waitForReaping()
-	return t.reapErr
+	return t.WaitWithTimeout(t.timeout)
 }
 
 // WaitWithTimeout waits for transfer completion with timeout

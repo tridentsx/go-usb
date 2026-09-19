@@ -90,6 +90,34 @@ func TestAsyncTransferWaitWithTimeout(t *testing.T) {
 	})
 }
 
+// TestAsyncTransferWaitHonorsConfiguredTimeout is a regression test for a
+// real bug found on real hardware: plain Wait() never consulted t.timeout
+// at all (only WaitWithTimeout's own explicit argument did), so a transfer
+// that never completes -- and nothing here ever will, without a real
+// device -- blocked Wait() forever regardless of SetTimeout. Given
+// AsyncTransferInterface has both SetTimeout and WaitWithTimeout as
+// separate methods, Wait must be the one that honors the former by
+// default; otherwise SetTimeout would have no real caller-visible effect
+// on the plain Wait path at all.
+func TestAsyncTransferWaitHonorsConfiguredTimeout(t *testing.T) {
+	transfer := NewAsyncTransfer(nil, 0x81, TransferTypeBulk, 8)
+	transfer.SetTimeout(40 * time.Millisecond)
+
+	start := time.Now()
+	err := transfer.Wait()
+	elapsed := time.Since(start)
+
+	if err != ErrTimeout {
+		t.Errorf("Wait returned %v, want ErrTimeout", err)
+	}
+	if elapsed < 40*time.Millisecond {
+		t.Errorf("returned after %v, want at least the configured 40ms timeout", elapsed)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("returned after %v, far longer than the configured 40ms timeout", elapsed)
+	}
+}
+
 // TestAsyncTransferMarkCompletedIsIdempotent guards the close-once invariant.
 // Both the IOKit completion callback and Cancel can reach this path, and closing
 // an already-closed channel panics.

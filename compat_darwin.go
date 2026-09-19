@@ -360,13 +360,14 @@ func (h *DeviceHandle) newAsyncTransfer(endpoint uint8, transferType TransferTyp
 	return NewAsyncTransfer(h, endpoint, transferType, bufferSize), nil
 }
 
-// Wait blocks until the transfer completes.
+// Wait blocks until the transfer completes, honoring the timeout set by
+// SetTimeout (5s by default if never called) exactly like WaitWithTimeout
+// would with that same value.
 func (t *AsyncTransfer) Wait() error {
 	if t.done == nil {
 		return ErrInvalidParameter
 	}
-	<-t.done
-	return nil
+	return t.WaitWithTimeout(t.timeout)
 }
 
 // WaitWithTimeout blocks until the transfer completes or the timeout elapses,
