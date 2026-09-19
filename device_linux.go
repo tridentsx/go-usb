@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -138,7 +139,29 @@ func (h *DeviceHandle) registerURBCompletion(urbPtr uintptr, callback func(error
 	}
 }
 
-// reapLoop continuously reaps completed URBs and notifies waiting transfers
+// reapPollInterval is how long reapLoop sleeps between REAPURBNDELAY polls
+// when nothing is ready to reap. Short enough that transfer completions and
+// Close still feel prompt, long enough that idling costs nothing
+// meaningful in CPU.
+const reapPollInterval = 5 * time.Millisecond
+
+// reapLoop reaps completed URBs and notifies waiting transfers.
+//
+// Uses USBDEVFS_REAPURBNDELAY (the non-blocking variant), polled on
+// reapPollInterval, rather than the plain blocking USBDEVFS_REAPURB this
+// used before. That version could deadlock Close(): Close cancels
+// outstanding URBs via USBDEVFS_DISCARDURB specifically so a REAPURB call
+// already blocked in the kernel unblocks -- but if the reap loop has
+// already reaped everything and gone back to waiting on a *fresh* blocking
+// REAPURB call with nothing outstanding, there is nothing left for Close
+// to discard, and that call never returns on its own, since no further URB
+// will ever be submitted once close begins. Confirmed on real hardware:
+// TestAsyncBulkLoopback's one URB completed (with a real, unrelated
+// EOVERFLOW status), reapLoop went back to a fresh blocking REAPURB with
+// an empty reapMap, and Close hung forever waiting for a reap loop that
+// could never notice h.closed on its own. Polling fixes this structurally:
+// the loop always revisits h.closed on its own within one poll interval,
+// with no dependency on an outstanding URB existing to cancel.
 func (h *DeviceHandle) reapLoop() {
 	defer func() {
 		if h.reapDone != nil {
@@ -164,18 +187,27 @@ func (h *DeviceHandle) reapLoop() {
 			return
 		}
 
-		// Wait for URB completion using REAPURB ioctl
+		// Poll for a completed URB without blocking, so this loop always
+		// comes back around to check h.closed above rather than
+		// potentially waiting forever for a completion that may never
+		// arrive.
 		var reapedURB *URB
 
 		_, _, errno := syscall.Syscall(
 			syscall.SYS_IOCTL,
 			uintptr(h.fd),
-			USBDEVFS_REAPURB,
+			USBDEVFS_REAPURBNDELAY,
 			uintptr(unsafe.Pointer(&reapedURB)),
 		)
-		if errno == syscall.EINTR || errno == syscall.EAGAIN {
+		if errno == syscall.EAGAIN {
+			// Nothing ready yet -- the expected, common case while idling.
+			time.Sleep(reapPollInterval)
 			continue
-		} else if errno != 0 {
+		}
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
 			h.reapMutex.Lock()
 			for _, callback := range h.reapMap {
 				callback(fmt.Errorf("reaper failed: %v", errno))

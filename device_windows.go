@@ -226,6 +226,24 @@ func (d *Device) Open() (*DeviceHandle, error) {
 }
 
 // Close closes the device handle
+// Close closes the device handle.
+//
+// Known gap, found while fixing the analogous real deadlock on Linux (see
+// device_linux.go's reapLoop): an AsyncTransfer with a very long or
+// disabled timeout (SetTimeout(0) or a large duration) that is still
+// genuinely in flight when Close runs here is not cancelled first --
+// unlike Linux, which now polls and always notices h.closed on its own,
+// or macOS, where CFRunLoopStop unconditionally interrupts the run loop
+// regardless of what is pending. Windows' AsyncTransfer.Submit goroutine
+// is only bounded by its own timeout (5s by default, real and safe for
+// that common case), so this is a real but narrow gap: it only matters if
+// a caller opts into an unusually long wait and then closes concurrently.
+// Not fixed here: AsyncTransfer.Cancel takes h.mu.RLock(), and this
+// function holds h.mu.Lock() for its entire body, so calling Cancel from
+// here directly would self-deadlock on Go's non-reentrant RWMutex --
+// fixing this for real needs restructuring that locking, and verifying
+// the fix against real Windows hardware, neither of which happened in
+// this pass.
 func (h *DeviceHandle) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
