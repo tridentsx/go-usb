@@ -132,3 +132,77 @@ func TestCloseDoesNotDeadlockWithIdlePump(t *testing.T) {
 		t.Fatal("Close did not return within 5s -- iocpPump deadlock")
 	}
 }
+
+// TestCloseDoesNotOrphanARacingRealCompletion is a regression test for a
+// real deadlock found on real hardware (a go-usb-jig board): Close cancels
+// every pending transfer via CancelIoEx, then immediately posts a synthetic
+// nil-overlapped completion on the same port to wake iocpPump. CancelIoEx
+// only requests cancellation and returns immediately -- Windows documents
+// the real completion (ERROR_OPERATION_ABORTED) as arriving later through
+// the normal completion mechanism, with no ordering guarantee against that
+// synthetic wake. On real hardware the synthetic wake reliably arrived
+// first: iocpPump saw the nil overlapped, observed h.closed, and returned
+// immediately, before the transfer's own real cancellation completion ever
+// arrived -- orphaning it. AsyncTransfer.Wait then blocked forever, since
+// nothing remained that would ever call its condition variable's Broadcast.
+//
+// This reproduces the ordering without needing real hardware or a real
+// cancellation: the delayed goroutine below stands in for the real
+// completion CancelIoEx would eventually trigger, posted well after Close
+// has already had time to post its own synthetic wake.
+func TestCloseDoesNotOrphanARacingRealCompletion(t *testing.T) {
+	h := &DeviceHandle{
+		fileHandle:       newOverlappedTestFile(t),
+		interfaceHandles: make(map[uint8]winusbInterfaceHandle),
+	}
+
+	transfer := &AsyncTransfer{handle: h}
+	transfer.cond = sync.NewCond(&transfer.mu)
+	if err := h.registerAsyncCompletion(&transfer.overlapped, transfer); err != nil {
+		t.Fatalf("registerAsyncCompletion: %v", err)
+	}
+
+	const wantQty = 7
+	go func() {
+		// Stand-in for CancelIoEx's real, slightly-delayed completion.
+		time.Sleep(20 * time.Millisecond)
+		if err := windows.PostQueuedCompletionStatus(h.iocp, wantQty, 0, &transfer.overlapped); err != nil {
+			t.Errorf("PostQueuedCompletionStatus: %v", err)
+		}
+	}()
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- h.Close() }()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(iocpDrainTimeout + 2*time.Second):
+		t.Fatal("Close did not return -- iocpPump stuck")
+	}
+
+	waitDone := make(chan struct{})
+	go func() {
+		transfer.mu.Lock()
+		for !transfer.done {
+			transfer.cond.Wait()
+		}
+		transfer.mu.Unlock()
+		close(waitDone)
+	}()
+
+	select {
+	case <-waitDone:
+	case <-time.After(1 * time.Second):
+		t.Fatal("the transfer's completion was never dispatched -- orphaned by Close, the exact bug this test guards against")
+	}
+
+	transfer.mu.Lock()
+	xferred := transfer.xferred
+	transfer.mu.Unlock()
+	if xferred != wantQty {
+		t.Errorf("xferred = %d, want %d", xferred, wantQty)
+	}
+}

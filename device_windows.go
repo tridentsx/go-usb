@@ -748,21 +748,66 @@ func (h *DeviceHandle) unregisterAsyncCompletion(overlapped *windows.Overlapped)
 	h.asyncMu.Unlock()
 }
 
+// iocpDrainTimeout bounds how long iocpPump waits, after Close has signaled
+// shutdown, for the real completions of transfers Close cancelled via
+// CancelIoEx. CancelIoEx only requests cancellation and returns immediately
+// -- Windows documents the actual completion (with ERROR_OPERATION_ABORTED)
+// as arriving later through the normal completion mechanism, with no
+// ordering guarantee against the synthetic wake Close also posts to the
+// same port. This bound exists only for the pathological case where a
+// completion genuinely never arrives (e.g. a misbehaving driver); in the
+// documented, expected case it never comes close to firing.
+const iocpDrainTimeout = 2 * time.Second
+
 // iocpPump is the single goroutine servicing every AsyncTransfer's
 // completion on this handle -- see registerAsyncCompletion's comment for
 // why there is exactly one of these per handle rather than one per
 // transfer.
+//
+// On shutdown it does not return the instant it sees Close's synthetic
+// nil-overlapped wake: it first found real hardware where doing so orphaned
+// a transfer Close had just cancelled -- the wake reliably arrived at this
+// loop before that transfer's own real cancellation completion, since
+// PostQueuedCompletionStatus is a same-process enqueue while the real
+// completion has to come back through the driver stack. AsyncTransfer.Wait
+// then blocked forever, since nothing remained to broadcast its condition
+// variable once this goroutine had already exited. Instead, once the wake
+// is seen, it keeps servicing real completions (exactly as it does before
+// shutdown) until h.iocpPending is actually empty, bounded by
+// iocpDrainTimeout as a last-resort escape from a completion that never
+// arrives at all.
 func (h *DeviceHandle) iocpPump() {
 	defer close(h.iocpDone)
 
+	draining := false
+	var drainDeadline time.Time
+
 	for {
+		timeoutMs := uint32(windows.INFINITE)
+		if draining {
+			remaining := time.Until(drainDeadline)
+			if remaining <= 0 {
+				return
+			}
+			timeoutMs = uint32(remaining.Milliseconds())
+			if timeoutMs == 0 {
+				timeoutMs = 1
+			}
+		}
+
 		var qty uint32
 		var key uintptr
 		var overlapped *windows.Overlapped
 
-		err := windows.GetQueuedCompletionStatus(h.iocp, &qty, &key, &overlapped, windows.INFINITE)
+		err := windows.GetQueuedCompletionStatus(h.iocp, &qty, &key, &overlapped, timeoutMs)
 
 		if overlapped == nil {
+			if draining && err == windows.WAIT_TIMEOUT {
+				// The drain window elapsed with a completion still
+				// outstanding: give up rather than wait forever.
+				return
+			}
+
 			// GetQueuedCompletionStatus itself failed (e.g. the port was
 			// closed) rather than reporting a completed-with-error I/O,
 			// which always has a real overlapped pointer -- nothing to
@@ -774,7 +819,16 @@ func (h *DeviceHandle) iocpPump() {
 			closed := h.closed
 			h.mu.RUnlock()
 			if closed {
-				return
+				h.asyncMu.Lock()
+				pending := len(h.iocpPending)
+				h.asyncMu.Unlock()
+				if pending == 0 {
+					return
+				}
+				if !draining {
+					draining = true
+					drainDeadline = time.Now().Add(iocpDrainTimeout)
+				}
 			}
 			continue
 		}
@@ -784,19 +838,22 @@ func (h *DeviceHandle) iocpPump() {
 		if ok {
 			delete(h.iocpPending, overlapped)
 		}
+		pending := len(h.iocpPending)
 		h.asyncMu.Unlock()
 
-		if !ok {
-			continue
+		if ok {
+			t.mu.Lock()
+			t.xferred = int(qty)
+			t.lastErr = err
+			t.done = true
+			t.submitted = false
+			t.cond.Broadcast()
+			t.mu.Unlock()
 		}
 
-		t.mu.Lock()
-		t.xferred = int(qty)
-		t.lastErr = err
-		t.done = true
-		t.submitted = false
-		t.cond.Broadcast()
-		t.mu.Unlock()
+		if draining && pending == 0 {
+			return
+		}
 	}
 }
 
