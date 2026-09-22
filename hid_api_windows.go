@@ -12,6 +12,31 @@ package usb
 //
 // A HID device supports report I/O and HID class requests, but not
 // vendor-specific control transfers, bulk transfers or isochronous transfers.
+//
+// This is a whole-handle decision, made exactly once in Device.Open based on
+// whether WinUsb_Initialize succeeds for the file handle as a whole -- it is
+// not, and cannot currently be, a per-interface one. ClaimInterface for a
+// non-zero interface only calls WinUsb_GetAssociatedInterface (plain WinUSB
+// pipe access) and never touches this decision. So for a composite device
+// with one WinUSB interface and one HID interface, bound to WinUSB as a
+// whole (e.g. via Zadig, which binds the entire device, not one interface),
+// Open's WinUsb_Initialize succeeds and IsHID() reports false for the whole
+// handle -- claiming the HID interface afterward changes nothing. This is
+// unlike macOS, where IOKit exposes each interface as its own service, so
+// per-interface HID attachment is architectural there (see
+// devicehandle_darwin.go/hid_darwin.go) with no Windows equivalent yet.
+//
+// Closing this gap on Windows would mean adding a WinUSB-based HID
+// implementation for a specific claimed interface -- technically
+// straightforward, since GET_REPORT/SET_REPORT are just class-specific
+// control transfers and Input reports are just interrupt-IN payloads, both
+// already reachable once an interface is claimed -- but it requires the
+// whole device to be WinUSB-bound already (as any Zadig-bound composite
+// device already is), which makes the device invisible to every other
+// application and to Windows' own input stack. Not implemented until a real
+// consumer needs a composite WinUSB+HID device to work this way; see
+// github.com/tridentsx/go-usb-jig's hid_windows_test.go for the real
+// hardware case this was found against.
 func (h *DeviceHandle) IsHID() bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
