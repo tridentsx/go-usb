@@ -123,7 +123,7 @@ func rootHubName(hc windows.Handle) (string, error) {
 	nameBytes := buf[4:returned]
 	nWords := len(nameBytes) / 2
 	u16 := make([]uint16, nWords)
-	for i := range nWords {
+	for i := 0; i < nWords; i++ {
 		u16[i] = binary.LittleEndian.Uint16(nameBytes[i*2:])
 	}
 	return windows.UTF16ToString(u16), nil
